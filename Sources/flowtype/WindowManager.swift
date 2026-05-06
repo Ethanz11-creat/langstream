@@ -53,6 +53,14 @@ final class OptionTapDetector: @unchecked Sendable {
     }
 }
 
+// MARK: - Log Formatter
+
+private nonisolated(unsafe) let logDateFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+    return f
+}()
+
 // MARK: - WindowManager
 
 @MainActor
@@ -62,6 +70,12 @@ class WindowManager: ObservableObject {
     private let orchestrator = PipelineOrchestrator.shared
 
     private var eventTapPort: CFMachPort?
+
+    /// Current trigger key from configuration
+    private var triggerKey: TriggerKey { ConfigurationStore.shared.current.triggerKey }
+
+    /// Cached trigger key for safe access from C callback (avoids actor isolation issues)
+    private nonisolated(unsafe) static var cachedTriggerKey: TriggerKey = .command
 
     init() {
         let view = AnyView(
@@ -84,25 +98,41 @@ class WindowManager: ObservableObject {
                 self.handleSingleTap()
             }
         }
-
-        setupGlobalHotkey()
     }
 
     // MARK: - Hotkey Setup
 
     func setupGlobalHotkey() {
-        let accessibilityEnabled = Self.checkAccessibilityPermission()
+        Self.fileLog("[WindowManager] setupGlobalHotkey called")
+        let accessibilityEnabled = PermissionHelper.checkAccessibility()
         if !accessibilityEnabled {
-            print("[WindowManager] WARNING: Accessibility permission not granted")
-        } else {
-            print("[WindowManager] Accessibility permission granted")
+            Self.fileLog("[WindowManager] WARNING: Accessibility permission not granted")
         }
 
+        Self.cachedTriggerKey = triggerKey
+        Self.fileLog("[WindowManager] Cached triggerKey: \(triggerKey.displayName)")
+
         setupCGEventTap()
-        print("[WindowManager] Global hotkey registered (double-tap Option to start, single-tap to stop)")
+        Self.fileLog("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
+    }
+
+    func reloadHotkey() {
+        Self.fileLog("[WindowManager] Reloading hotkey configuration...")
+        Self.cachedTriggerKey = triggerKey
+        if let tap = eventTapPort {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            }
+            CFMachPortInvalidate(tap)
+            eventTapPort = nil
+        }
+        setupCGEventTap()
+        Self.fileLog("[WindowManager] Hotkey reloaded with trigger key: \(triggerKey.displayName)")
     }
 
     private func setupCGEventTap() {
+        Self.fileLog("[WindowManager] setupCGEventTap called")
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
 
         guard let tap = CGEvent.tapCreate(
@@ -113,49 +143,64 @@ class WindowManager: ObservableObject {
             callback: Self.eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("[WindowManager] Failed to create CGEvent tap")
+            Self.fileLog("[WindowManager] FAILED to create CGEvent tap")
             return
         }
 
         self.eventTapPort = tap
 
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        if let source = runLoopSource {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        Self.fileLog("[EventTap] CGEvent tap created and enabled successfully")
+    }
 
-        DispatchQueue.global(qos: .userInteractive).async { [runLoopSource] in
-            let runLoop = CFRunLoopGetCurrent()
-            if let source = runLoopSource {
-                CFRunLoopAddSource(runLoop, source, .commonModes)
+    /// Reliable file-based logger that works inside .app bundles where stdout is lost.
+    /// Logs are written to ~/Library/Logs/flowtype/diagnostic.log for consistency.
+    nonisolated static func fileLog(_ message: String) {
+        let logDir = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Logs/flowtype")
+        let path = (logDir as NSString).appendingPathComponent("diagnostic.log")
+        let line = "[\(logDateFormatter.string(from: Date()))] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        do {
+            try FileManager.default.createDirectory(
+                atPath: logDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            if FileManager.default.fileExists(atPath: path) {
+                let fh = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+                fh.seekToEndOfFile()
+                fh.write(data)
+                fh.closeFile()
+            } else {
+                FileManager.default.createFile(atPath: path, contents: data, attributes: nil)
             }
-            CGEvent.tapEnable(tap: tap, enable: true)
-            CFRunLoopRun()
+        } catch {
+            // Silent fail — logging should never crash the app
         }
     }
 
-    /// CGEventTap callback — runs on background thread, must be @convention(c).
-    /// We ONLY check flagsChanged for Option-key press and immediately
-    /// bounce to the main thread via Task { @MainActor }.
+    /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
+    /// Uses cachedTriggerKey to avoid actor isolation issues from C callback context.
     private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
-        guard let refcon = refcon else {
-            return Unmanaged.passRetained(event)
-        }
-
-        // We only care about flagsChanged events
         guard type == .flagsChanged else {
             return Unmanaged.passRetained(event)
         }
 
         let flags = event.flags
-        let isOptionNow = flags.contains(.maskAlternate)
+        let triggerFlag = cachedTriggerKey.cgEventFlag
+        let isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
 
-        if isOptionNow {
-            // Bounce to MainActor so OptionTapDetector (which is not isolated)
-            // receives the tap on the main thread.
-            Task { @MainActor in
-                OptionTapDetector.shared.recordTap()
-            }
+        if isTriggerKeyNow {
+            fileLog("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.displayName))")
+            OptionTapDetector.shared.recordTap()
         }
 
-        // Always pass the event through — never consume it.
         return Unmanaged.passRetained(event)
     }
 
@@ -221,7 +266,4 @@ class WindowManager: ObservableObject {
         }
     }
 
-    private static func checkAccessibilityPermission() -> Bool {
-        return AXIsProcessTrusted()
-    }
 }

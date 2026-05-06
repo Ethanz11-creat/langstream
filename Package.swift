@@ -14,10 +14,17 @@ let package = Package(
             path: "Sources/flowtype",
             resources: [
                 .copy("Resources/tech_terms.json"),
-                .copy("Resources/filler_words.json")
+                .copy("Resources/filler_words.json"),
+                .copy("Resources/AppIcon.icns"),
+                .copy("Resources/status_bar_icon.png"),
+                .copy("Resources/status_bar_icon@2x.png")
             ],
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"]) // 允许使用 @main
+            ],
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("Speech")
             ]
         ),
     ]

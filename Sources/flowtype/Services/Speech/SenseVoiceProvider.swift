@@ -1,11 +1,11 @@
 import Foundation
 
 final class SenseVoiceProvider: SiliconFlowSpeechProvider {
-    init(configuration: Configuration = .shared) {
+    init(config: ServiceConfig = Configuration.shared.effectiveAsrFallbackConfig) {
         super.init(
             name: "SenseVoice",
-            model: configuration.asrFallbackModel,
-            configuration: configuration
+            model: config.model,
+            config: config
         )
     }
 }

@@ -1,5 +1,5 @@
 import Foundation
-import Speech
+@preconcurrency import Speech
 import AVFoundation
 
 final class AppleSpeechProvider: SpeechProvider, @unchecked Sendable {
@@ -13,16 +13,68 @@ final class AppleSpeechProvider: SpeechProvider, @unchecked Sendable {
     private nonisolated(unsafe) var finalResult: String = ""
 
     init() {
-        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        // Only use on-device recognition; if not supported, the recognizer is nil-effectively
+        if let r = recognizer, !r.supportsOnDeviceRecognition {
+            print("[AppleSpeechProvider] WARNING: On-device recognition not supported on this device. AppleSpeech will not be available.")
+        }
+        self.recognizer = recognizer
+    }
+
+    /// Check if on-device speech recognition is available on this Mac.
+    static func isAvailable() -> Bool {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else {
+            return false
+        }
+        return recognizer.isAvailable && recognizer.supportsOnDeviceRecognition
     }
 
     // MARK: - SpeechProvider Protocol
 
+    /// One-shot offline recognition from WAV data.
+    /// Writes data to a temp file and uses SFSpeechURLRecognitionRequest with on-device recognition.
     func transcribe(audioData: Data, timeout: TimeInterval = 20) async throws -> String {
-        throw SpeechProviderError.notAvailable
+        guard let recognizer = recognizer,
+              recognizer.isAvailable,
+              recognizer.supportsOnDeviceRecognition else {
+            throw SpeechProviderError.notAvailable
+        }
+
+        // Write WAV data to a temporary file
+        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpFile = tmpDir.appendingPathComponent("flowtype_apple_speech_\(UUID().uuidString).wav")
+        try audioData.write(to: tmpFile)
+        defer {
+            try? FileManager.default.removeItem(at: tmpFile)
+        }
+
+        let request = SFSpeechURLRecognitionRequest(url: tmpFile)
+        request.requiresOnDeviceRecognition = true
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let task = recognizer.recognitionTask(with: request) { result, error in
+                if let error = error {
+                    continuation.resume(throwing: SpeechProviderError.transcriptionFailed(error.localizedDescription))
+                    return
+                }
+                guard let result = result else {
+                    continuation.resume(throwing: SpeechProviderError.transcriptionFailed("No result"))
+                    return
+                }
+                if result.isFinal {
+                    let text = result.bestTranscription.formattedString
+                    continuation.resume(returning: text)
+                }
+            }
+
+            // Timeout guard
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                task.cancel()
+            }
+        }
     }
 
-    // MARK: - Real-time Streaming Recognition
+    // MARK: - Real-time Streaming Recognition (for preview during recording)
 
     func startStreamingRecognition() -> AsyncStream<String> {
         finalResult = ""
@@ -40,8 +92,10 @@ final class AppleSpeechProvider: SpeechProvider, @unchecked Sendable {
             return AsyncStream { $0.finish() }
         }
 
-        guard let recognizer = recognizer, recognizer.isAvailable else {
-            print("[AppleSpeechProvider] Speech recognizer not available")
+        guard let recognizer = recognizer,
+              recognizer.isAvailable,
+              recognizer.supportsOnDeviceRecognition else {
+            print("[AppleSpeechProvider] On-device speech recognizer not available")
             return AsyncStream { $0.finish() }
         }
 
@@ -51,7 +105,7 @@ final class AppleSpeechProvider: SpeechProvider, @unchecked Sendable {
             // Create recognition request
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = false
+            request.requiresOnDeviceRecognition = true
             self.recognitionRequest = request
 
             // Create recognition task

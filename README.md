@@ -19,8 +19,9 @@ It helps developers turn spoken, messy, and highly verbal thoughts into clearer 
 
 | Action | Result |
 |--------|--------|
-| Single press `Option` | Output raw spoken text |
-| Double press `Option` | Output refined, structured prompt text |
+| Double press `Command` | Start voice recording (capsule window appears) |
+| Single press `Command` (while recording) | Stop and output raw spoken text |
+| Double press `Command` (while recording) | Stop and output LLM-polished structured prompt |
 
 ## Use cases
 
@@ -31,43 +32,52 @@ It helps developers turn spoken, messy, and highly verbal thoughts into clearer 
 
 ## How it works
 
-1. **Record** — Hold `Option` to start voice capture
-2. **Transcribe** — Audio is sent to ASR providers (parallel routing with scoring)
-3. **Refine** — LLM cleans up filler words, fixes recognition errors, and structures the prompt
-4. **Inject** — Result is typed directly into your active text field
+1. **Record** — Double press `Command` to start voice capture (a capsule window appears at the bottom)
+2. **Preview** — Apple on-device speech recognition shows real-time transcription as you speak
+3. **Transcribe** — Audio is sent to ASR providers (parallel routing with scoring) when recording stops
+4. **Refine** — LLM cleans up filler words, fixes recognition errors, and structures the prompt (double-press end only)
+5. **Inject** — Result is typed directly into your active text field
 
 ## Architecture
 
 ```
 Sources/flowtype/
 ├── App/
-│   └── FlowTypeApp.swift          # Entry point, accessory-only app
+│   ├── FlowTypeApp.swift              # Entry point, accessory-only app
+│   └── StatusBarController.swift      # Status bar icon & menu
 ├── Core/
-│   ├── AppState.swift             # Global state management
-│   ├── Configuration.swift        # .env-based config & system prompt
-│   ├── PipelineOrchestrator.swift # End-to-end audio → text pipeline
-│   └── AsyncRefiner.swift         # Async LLM refinement
+│   ├── AppState.swift                 # Global state management
+│   ├── Configuration.swift            # Configuration model
+│   ├── ConfigurationStore.swift       # UserDefaults persistence with debounce
+│   ├── EnvMigration.swift             # One-time .env → GUI migration
+│   ├── PipelineOrchestrator.swift     # End-to-end audio → text pipeline
+│   └── AsyncRefiner.swift             # Parallel ASR + LLM refinement
 ├── Services/
-│   ├── AudioRecorder.swift        # macOS audio capture
-│   ├── KeyboardInjector.swift     # Text insertion via HID
-│   ├── LLMService.swift           # SiliconFlow API client
+│   ├── AudioRecorder.swift            # macOS audio capture (segmented)
+│   ├── KeyboardInjector.swift         # Text insertion via clipboard / HID
+│   ├── LLMService.swift               # SiliconFlow SSE streaming client
 │   └── Speech/
-│       ├── SpeechRouter.swift     # Multi-provider routing & scoring
-│       ├── SpeechProvider.swift   # Protocol
-│       ├── ASRPostProcessor.swift # Filler stripping, term correction
-│       ├── ASRResultScorer.swift  # Quality scoring
+│       ├── SpeechRouter.swift         # Multi-provider routing & scoring
+│       ├── SpeechProvider.swift       # Protocol
+│       ├── ASRPostProcessor.swift     # Filler stripping, term correction
+│       ├── ASRResultScorer.swift      # 7-dimension quality scoring
+│       ├── AppleSpeechProvider.swift  # On-device speech recognition (preview + fallback)
 │       ├── TeleSpeechProvider.swift
 │       ├── SenseVoiceProvider.swift
 │       └── SiliconFlowSpeechProvider.swift
+├── Settings/
+│   ├── SettingsView.swift             # SwiftUI settings panel
+│   └── SettingsWindowController.swift # Settings window host
 ├── UI/
-│   └── AudioVisualizer.swift      # Recording visual feedback
+│   └── AudioVisualizer.swift          # Recording visual feedback
 ├── Utilities/
-│   ├── AudioFormatConverter.swift
-│   ├── SegmentMerger.swift
-│   └── DotEnv.swift               # .env file parser
+│   ├── AudioFormatConverter.swift     # PCM → WAV, normalization, silence trim
+│   ├── SegmentMerger.swift            # Deduplicated segment merging
+│   ├── DotEnv.swift                   # .env file parser (legacy)
+│   └── PermissionHelper.swift         # Accessibility permission check & guide
 ├── Resources/
-│   ├── tech_terms.json            # Tech term corrections
-│   └── filler_words.json          # Filler word dictionary
+│   ├── tech_terms.json                # Tech term corrections
+│   └── filler_words.json              # Filler word dictionary
 ```
 
 ## Requirements
@@ -83,31 +93,33 @@ Sources/flowtype/
 git clone <repo-url>
 cd Flowtype
 
-# 2. Configure environment
-cp .env.example .env
-# Edit .env and add your SILICONFLOW_API_KEY
-
-# 3. Build
+# 2. Build
 swift build
 
-# 4. Run
+# 3. Run
 swift run FlowType
+```
+
+Or build the `.app` bundle:
+
+```bash
+./scripts/build-app.sh
+open build/Flowtype.app
 ```
 
 ## Configuration
 
-All settings are managed via the `.env` file:
+All settings are managed through the **Settings GUI** (click the status bar icon → Settings, or press `Cmd + ,`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SILICONFLOW_API_KEY` | — | Required. API key from SiliconFlow |
-| `ASR_PRIMARY_MODEL` | `TeleAI/TeleSpeechASR` | Primary ASR model |
-| `ASR_FALLBACK_MODEL` | `FunAudioLLM/SenseVoiceSmall` | Fallback ASR model |
-| `ASR_STRATEGY` | `parallel` | `parallel` (run both, score) or `fallback` (sequential) |
-| `LLM_MODEL` | `deepseek-ai/DeepSeek-V3` | Model for prompt refinement |
-| `ENABLE_FILLER_STRIP` | `1` | Remove filler words (嗯, 那个, etc.) |
-| `ENABLE_TERM_CORRECTION` | `1` | Correct tech term misrecognitions |
-| `FLOWTYPE_DUMP_AUDIO` | `0` | Save recordings to `~/Library/Logs/flowtype/` for debugging |
+| Section | Settings |
+|----------|---------|
+| **ASR Primary** | Provider, Base URL, API Key, Model ID |
+| **ASR Fallback** | Provider, Base URL, API Key, Model ID |
+| **LLM** | Provider, Base URL, API Key, Model ID |
+| **Trigger Key** | Fn / Control / Option / Command |
+| **ASR Strategy** | Parallel (run both, pick best) or Fallback (primary first) |
+
+Settings are persisted to `UserDefaults` automatically. An existing `.env` file will be **migrated once** on first launch, after which the GUI settings take precedence.
 
 ## ASR Evaluation
 

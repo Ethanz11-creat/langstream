@@ -21,7 +21,7 @@ final class AsyncRefiner {
     func transcribeWithScoring(audioData: Data) async -> TranscriptionResult? {
         let strategy = Configuration.shared.asrStrategy
 
-        if strategy == "fallback" {
+        if strategy == .fallback {
             return await transcribeWithFallback(audioData: audioData)
         }
 
@@ -54,6 +54,19 @@ final class AsyncRefiner {
             print("[AsyncRefiner] SenseVoice raw: '\(text)' score: \(String(format: "%.2f", scored.score))")
         } else {
             print("[AsyncRefiner] SenseVoice failed or empty")
+        }
+
+        // Try local AppleSpeech as last resort if both cloud providers failed
+        if results.isEmpty {
+            do {
+                let text = try await self.speechRouter.localProvider.transcribe(audioData: audioData, timeout: 10)
+                if !text.isEmpty {
+                    print("[AsyncRefiner] AppleSpeech local fallback succeeded")
+                    return TranscriptionResult(text: text, provider: "AppleSpeech", isFallback: true, duration: 0)
+                }
+            } catch {
+                print("[AsyncRefiner] AppleSpeech local fallback failed: \(error)")
+            }
         }
 
         guard let best = results.max(by: { $0.score < $1.score }) else {
@@ -93,6 +106,17 @@ final class AsyncRefiner {
             }
         } catch {
             print("[AsyncRefiner] SenseVoice fallback failed: \(error)")
+        }
+
+        // Final fallback: local AppleSpeech (offline)
+        do {
+            let text = try await self.speechRouter.localProvider.transcribe(audioData: audioData, timeout: 10)
+            if !text.isEmpty {
+                print("[AsyncRefiner] AppleSpeech local fallback succeeded")
+                return TranscriptionResult(text: text, provider: "AppleSpeech", isFallback: true, duration: 0)
+            }
+        } catch {
+            print("[AsyncRefiner] AppleSpeech local fallback failed: \(error)")
         }
 
         return nil

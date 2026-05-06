@@ -16,15 +16,28 @@ struct FlowTypeApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 0, height: 0)
-
-        Settings {
-            Text("Settings")
-        }
     }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        _ = ConfigurationStore.shared
+        EnvMigration.migrateIfNeeded()
+        StatusBarController.shared.setup()
+
+        let hasAccessibility = PermissionHelper.checkAccessibility()
+        if !hasAccessibility {
+            PermissionHelper.showPermissionGuide()
+        }
+
+        WindowManager.fileLog("[AppDelegate] Setting up global hotkey...")
+        WindowManager.shared.setupGlobalHotkey()
+        WindowManager.fileLog("[AppDelegate] Flowtype launched successfully")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Don't terminate when settings window is closed
+        return false
     }
 }

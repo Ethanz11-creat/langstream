@@ -11,8 +11,9 @@ final class PipelineOrchestrator {
     private let appState = AppState()
     private let audioRecorder = AudioRecorder()
     private let speechRouter = SpeechRouter()
-    private let llmService = LLMService()
+    private let llmService = LLMService(configuration: Configuration.shared)
     private lazy var asyncRefiner = AsyncRefiner(speechRouter: speechRouter, llmService: llmService)
+    private let appleSpeechProvider = AppleSpeechProvider()
 
     private var recordingTask: Task<Void, Never>?
 
@@ -84,19 +85,43 @@ final class PipelineOrchestrator {
             do {
                 // 1. Check microphone permission (fast path if already granted)
                 print("[PipelineOrchestrator] Requesting mic permission...")
+                WindowManager.fileLog("Pipeline: requesting mic permission...")
                 let granted = await self.audioRecorder.requestPermission()
                 guard granted else {
                     print("[PipelineOrchestrator] Mic permission denied")
-                    self.appState.showError("请在系统设置中允许麦克风访问")
+                    WindowManager.fileLog("Pipeline: mic permission DENIED")
+                    // Provide actionable guidance for ad-hoc signed builds where the
+                    // system may silently deny without showing a dialog.
+                    let status = self.audioRecorder.authorizationStatus()
+                    if status == 0 {
+                        self.appState.showError("麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。")
+                    } else if status == 1 {
+                        self.appState.showError("麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。")
+                    } else {
+                        self.appState.showError("请在系统设置中允许麦克风访问")
+                    }
                     return
                 }
                 print("[PipelineOrchestrator] Mic permission granted")
+                WindowManager.fileLog("Pipeline: mic permission granted")
                 try Task.checkCancellation()
 
                 // 2. Start AudioRecorder
                 print("[PipelineOrchestrator] Starting AudioRecorder...")
                 let output = try await self.audioRecorder.startRecording()
                 print("[PipelineOrchestrator] AudioRecorder started")
+
+                // 2.5 Set up real-time AppleSpeech preview (on-device, offline)
+                self.audioRecorder.onAudioBuffer = { [weak self] buffer in
+                    self?.appleSpeechProvider.appendAudioBuffer(buffer)
+                }
+                let previewStream = self.appleSpeechProvider.startStreamingRecognition()
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    for await text in previewStream {
+                        self.appState.updatePreviewText(text)
+                    }
+                }
 
                 // 3. Consume segment stream in background — each 60s chunk gets ASR’d immediately
                 Task { @MainActor [weak self] in
@@ -147,6 +172,11 @@ final class PipelineOrchestrator {
         // 1. Stop AudioRecorder — returns completed 60s segments + final partial buffer
         print("[PipelineOrchestrator] Stopping AudioRecorder...")
         let (_, finalData) = self.audioRecorder.stopRecording()
+        self.audioRecorder.onAudioBuffer = nil
+
+        // Stop AppleSpeech streaming and capture final local result
+        let localPreviewText = self.appleSpeechProvider.stopStreamingRecognition()
+
         recordingTask?.cancel()
         recordingTask = nil
 
@@ -191,9 +221,15 @@ final class PipelineOrchestrator {
             }
 
             // 5. Combine all ASR results
-            let fullASRText = [combinedSegmentText, finalASRText]
+            var fullASRText = [combinedSegmentText, finalASRText]
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n")
+
+            // Fallback to AppleSpeech local result if cloud ASR produced nothing
+            if fullASRText.isEmpty, !localPreviewText.isEmpty {
+                print("[PipelineOrchestrator] Cloud ASR empty, using AppleSpeech local preview")
+                fullASRText = localPreviewText
+            }
 
             guard !fullASRText.isEmpty else {
                 print("[PipelineOrchestrator] Combined ASR text is empty")

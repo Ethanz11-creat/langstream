@@ -16,7 +16,7 @@ actor LLMService {
     private let maxTokens: Int
     private let systemPrompt: String
 
-    init(configuration: Configuration = .shared) {
+    init(configuration: Configuration) {
         self.apiKey = configuration.apiKey
         self.baseURL = configuration.baseURL
         self.model = configuration.llmModel

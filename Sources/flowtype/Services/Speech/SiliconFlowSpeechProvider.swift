@@ -7,12 +7,12 @@ class SiliconFlowSpeechProvider: SpeechProvider {
     private let baseURL: String
     private let prompt: String?
 
-    init(name: String, model: String, prompt: String? = nil, configuration: Configuration = .shared) {
+    init(name: String, model: String, prompt: String? = nil, config: ServiceConfig) {
         self.name = name
         self.model = model
         self.prompt = prompt
-        self.apiKey = configuration.apiKey
-        self.baseURL = configuration.baseURL
+        self.apiKey = config.apiKey
+        self.baseURL = config.baseURL
     }
 
     func transcribe(audioData: Data, timeout: TimeInterval = 20) async throws -> String {

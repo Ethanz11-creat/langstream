@@ -40,12 +40,38 @@ final class AudioRecorder: @unchecked Sendable {
     // Diagnostics
     private nonisolated(unsafe) var tapCallCount = 0
 
+    /// Optional callback to forward real-time audio buffers to a streaming recognizer.
+    /// Called on the audio tap thread with the converted 16kHz mono float32 buffer.
+    var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
+
+    /// Check current microphone permission status without triggering a dialog.
+    /// Returns raw value: 0=undetermined, 1=denied, 2=granted
+    func authorizationStatus() -> Int {
+        AVAudioApplication.shared.recordPermission.rawValue
+    }
+
+    /// Request microphone permission. On macOS with ad-hoc signing, the system
+    /// may silently deny without showing a dialog. Callers should check status
+    /// afterward and guide the user to System Settings if needed.
     func requestPermission() async -> Bool {
-        await withCheckedContinuation { continuation in
+        let status = AVAudioApplication.shared.recordPermission
+        // macOS uses FourCC values ('undt', 'deny', 'grnt'), not 0/1/2.
+        // Compare enum cases directly instead of rawValue.
+        WindowManager.fileLog("AudioRecorder: mic status = \(status) (undetermined/denied/granted)")
+
+        // Only request if undetermined; if already denied, don't re-prompt
+        guard status == .undetermined else {
+            WindowManager.fileLog("AudioRecorder: mic status is not undetermined, skipping request")
+            return status == .granted
+        }
+
+        let granted = await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { granted in
                 continuation.resume(returning: granted)
             }
         }
+        WindowManager.fileLog("AudioRecorder: mic request result = \(granted)")
+        return granted
     }
 
     // nonisolated — ensures installTap closure is NOT created on @MainActor
@@ -129,6 +155,9 @@ final class AudioRecorder: @unchecked Sendable {
                 }
                 let outputFrames = Int(convertedBuffer.frameLength)
                 print("[AudioRecorder] Tap #\(callIndex): converted outputFrames=\(outputFrames)")
+
+                // Forward to streaming recognizer (e.g., AppleSpeech) for real-time preview
+                self.onAudioBuffer?(convertedBuffer)
 
                 // Append to accumulated full buffer
                 if let mainBuffer = self.audioBuffer,

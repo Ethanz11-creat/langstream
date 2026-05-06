@@ -19,8 +19,9 @@ Flowtype 是一款为 AI 编程工作流打造的 macOS 语音输入应用。
 
 | 操作 | 结果 |
 |------|------|
-| 单击 `Option` | 输出原始语音文本 |
-| 双击 `Option` | 输出优化后的结构化提示词 |
+| 双击 `Command` | 开始录音（底部出现悬浮胶囊窗口） |
+| 单击 `Command`（录音中） | 结束录音，输出原始语音文本 |
+| 双击 `Command`（录音中） | 结束录音，输出 LLM 润色后的结构化提示词 |
 
 ## 使用场景
 
@@ -31,43 +32,52 @@ Flowtype 是一款为 AI 编程工作流打造的 macOS 语音输入应用。
 
 ## 工作流程
 
-1. **录音** —— 按住 `Option` 开始语音捕获
-2. **转写** —— 音频发送至 ASR 服务提供商（并行路由 + 质量评分）
-3. **精炼** —— LLM 清理填充词、修正识别错误、结构化提示词
-4. **注入** —— 结果直接输入到当前活动文本框
+1. **录音** —— 双击 `Command` 开始语音捕获（底部出现悬浮胶囊窗口）
+2. **实时预览** —— Apple 本地语音识别实时显示转写文字
+3. **转写** —— 停止录音后，音频发送至 ASR 服务提供商（并行路由 + 质量评分）
+4. **精炼** —— LLM 清理填充词、修正识别错误、结构化提示词（仅双击结束时）
+5. **注入** —— 结果直接输入到当前活动文本框
 
 ## 架构
 
 ```
 Sources/flowtype/
 ├── App/
-│   └── FlowTypeApp.swift          # 入口，菜单栏应用
+│   ├── FlowTypeApp.swift              # 入口，菜单栏应用
+│   └── StatusBarController.swift      # 菜单栏图标与菜单
 ├── Core/
-│   ├── AppState.swift             # 全局状态管理
-│   ├── Configuration.swift        # .env 配置与系统提示词
-│   ├── PipelineOrchestrator.swift # 端到端音频 → 文本流水线
-│   └── AsyncRefiner.swift         # 异步 LLM 精炼
+│   ├── AppState.swift                 # 全局状态管理
+│   ├── Configuration.swift            # 配置模型
+│   ├── ConfigurationStore.swift       # UserDefaults 持久化（带防抖）
+│   ├── EnvMigration.swift             # 一次性 .env → GUI 迁移
+│   ├── PipelineOrchestrator.swift     # 端到端音频 → 文本流水线
+│   └── AsyncRefiner.swift             # 并行 ASR + LLM 精炼
 ├── Services/
-│   ├── AudioRecorder.swift        # macOS 音频采集
-│   ├── KeyboardInjector.swift     # 通过 HID 注入文本
-│   ├── LLMService.swift           # SiliconFlow API 客户端
+│   ├── AudioRecorder.swift            # macOS 音频采集（分段式）
+│   ├── KeyboardInjector.swift         # 剪贴板粘贴 / HID 逐字注入
+│   ├── LLMService.swift               # SiliconFlow SSE 流式客户端
 │   └── Speech/
-│       ├── SpeechRouter.swift     # 多提供商路由与评分
-│       ├── SpeechProvider.swift   # 协议定义
-│       ├── ASRPostProcessor.swift # 填充词过滤、术语纠正
-│       ├── ASRResultScorer.swift  # 质量评分
+│       ├── SpeechRouter.swift         # 多提供商路由与评分
+│       ├── SpeechProvider.swift       # 协议定义
+│       ├── ASRPostProcessor.swift     # 填充词过滤、术语纠正
+│       ├── ASRResultScorer.swift      # 7 维度质量评分
+│       ├── AppleSpeechProvider.swift  # Apple 本地语音识别（预览 + 兜底）
 │       ├── TeleSpeechProvider.swift
 │       ├── SenseVoiceProvider.swift
 │       └── SiliconFlowSpeechProvider.swift
+├── Settings/
+│   ├── SettingsView.swift             # SwiftUI 设置面板
+│   └── SettingsWindowController.swift # 设置窗口宿主
 ├── UI/
-│   └── AudioVisualizer.swift      # 录音可视化反馈
+│   └── AudioVisualizer.swift          # 录音可视化反馈
 ├── Utilities/
-│   ├── AudioFormatConverter.swift
-│   ├── SegmentMerger.swift
-│   └── DotEnv.swift               # .env 文件解析器
+│   ├── AudioFormatConverter.swift     # PCM → WAV、音量归一化、静音修剪
+│   ├── SegmentMerger.swift            # 去重合并多段结果
+│   ├── DotEnv.swift                   # .env 文件解析器（兼容旧版）
+│   └── PermissionHelper.swift         # 辅助功能权限检测与引导
 ├── Resources/
-│   ├── tech_terms.json            # 技术术语纠正表
-│   └── filler_words.json          # 填充词词典
+│   ├── tech_terms.json                # 技术术语纠正表
+│   └── filler_words.json              # 填充词词典
 ```
 
 ## 环境要求
@@ -83,31 +93,33 @@ Sources/flowtype/
 git clone <仓库地址>
 cd Flowtype
 
-# 2. 配置环境
-cp .env.example .env
-# 编辑 .env，填入你的 SILICONFLOW_API_KEY
-
-# 3. 构建
+# 2. 构建
 swift build
 
-# 4. 运行
+# 3. 运行
 swift run FlowType
+```
+
+或构建 `.app` 应用包：
+
+```bash
+./scripts/build-app.sh
+open build/Flowtype.app
 ```
 
 ## 配置说明
 
-所有设置通过 `.env` 文件管理：
+所有设置通过 **设置界面** 管理（点击菜单栏图标 → 设置，或按 `Cmd + ,`）：
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SILICONFLOW_API_KEY` | — | 必填。SiliconFlow 平台的 API Key |
-| `ASR_PRIMARY_MODEL` | `TeleAI/TeleSpeechASR` | 主 ASR 模型 |
-| `ASR_FALLBACK_MODEL` | `FunAudioLLM/SenseVoiceSmall` | 备用 ASR 模型 |
-| `ASR_STRATEGY` | `parallel` | `parallel`（并行运行，评分选优）或 `fallback`（顺序回退） |
-| `LLM_MODEL` | `deepseek-ai/DeepSeek-V3` | 用于提示词精炼的模型 |
-| `ENABLE_FILLER_STRIP` | `1` | 去除填充词（嗯、那个 等） |
-| `ENABLE_TERM_CORRECTION` | `1` | 纠正技术术语识别错误 |
-| `FLOWTYPE_DUMP_AUDIO` | `0` | 将录音保存至 `~/Library/Logs/flowtype/` 用于调试 |
+| 分类 | 设置项 |
+|------|--------|
+| **主识别模型** | 服务商、Base URL、API Key、模型 ID |
+| **兜底识别模型** | 服务商、Base URL、API Key、模型 ID |
+| **文本润色模型** | 服务商、Base URL、API Key、模型 ID |
+| **触发键** | Fn / Control / Option / Command |
+| **识别策略** | 并行双发（同时运行两个模型，评分选优）/ 主模型优先（失败时回退） |
+
+设置会自动保存到 `UserDefaults`。如果存在 `.env` 文件，首次启动时会**自动迁移一次**，此后以 GUI 设置为准。
 
 ## ASR 评估
 
