@@ -91,7 +91,6 @@ struct CapsuleView: View {
         case .idle: return "准备就绪"
         case .requestingPermission: return "请求权限..."
         case .recording: return "Listening..."
-        case .previewing: return appState.isRefining ? "润色中..." : "实时预览..."
         case .processingASR(let provider): return "\(provider)..."
         case .polishing: return appState.isRefining ? "润色中..." : "润色完成"
         case .injecting: return "输入中..."
@@ -101,18 +100,16 @@ struct CapsuleView: View {
 
     private var statusSubtitle: String {
         switch appState.state {
-        case .idle: return "双击 Option 开始"
+        case .idle: return "双击 Command 开始"
         case .requestingPermission: return ""
         case .recording(let seconds):
-            // During recording: show timer + preview text (or placeholder)
+            // During recording: show timer + debounced preview text (or placeholder)
             let timer = String(format: "%02d:%02d", seconds / 60, seconds % 60)
-            if appState.previewText.isEmpty {
+            if appState.displayedPreviewText.isEmpty {
                 return "\(timer) · 正在听写..."
             } else {
-                return "\(timer) · \(appState.previewText)"
+                return "\(timer) · \(appState.displayedPreviewText)"
             }
-        case .previewing:
-            return appState.previewText.isEmpty ? "正在听写..." : appState.previewText
         case .processingASR:
             return appState.previewText.isEmpty ? "识别中..." : appState.previewText
         case .polishing(let preview):
@@ -128,7 +125,6 @@ struct CapsuleView: View {
         case .idle: return Color.white.opacity(0.5)
         case .requestingPermission: return .yellow
         case .recording: return Color(red: 0.5, green: 0.3, blue: 1.0)
-        case .previewing: return Color(red: 0.5, green: 0.3, blue: 1.0)
         case .processingASR: return .blue
         case .polishing: return Color(red: 0.8, green: 0.4, blue: 0.9)
         case .injecting: return .green
@@ -158,7 +154,6 @@ struct StatusAvatar: View {
         case .idle: return "mic"
         case .requestingPermission: return "hand.raised"
         case .recording: return "waveform"
-        case .previewing: return "waveform"
         case .processingASR: return "brain.head.profile"
         case .polishing: return "sparkles"
         case .injecting: return "keyboard"
@@ -170,7 +165,7 @@ struct StatusAvatar: View {
         switch state {
         case .idle: return .gray
         case .requestingPermission: return .yellow
-        case .recording, .previewing: return Color(red: 0.5, green: 0.3, blue: 1.0)
+        case .recording: return Color(red: 0.5, green: 0.3, blue: 1.0)
         case .processingASR: return .blue
         case .polishing: return Color(red: 0.8, green: 0.4, blue: 0.9)
         case .injecting: return .green

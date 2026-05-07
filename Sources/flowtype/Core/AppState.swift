@@ -5,7 +5,6 @@ enum RecordingState: Equatable {
     case idle
     case requestingPermission
     case recording(elapsedSeconds: Int)
-    case previewing(text: String)   // Real-time AppleSpeech preview
     case processingASR(provider: String)
     case polishing(preview: String)
     case injecting
@@ -16,7 +15,6 @@ enum RecordingState: Equatable {
         case .idle: return "准备就绪"
         case .requestingPermission: return "请求权限..."
         case .recording: return "正在倾听..."
-        case .previewing: return "实时预览..."
         case .processingASR(let provider): return "\(provider)..."
         case .polishing: return "润色中..."
         case .injecting: return "输入中..."
@@ -26,7 +24,6 @@ enum RecordingState: Equatable {
 
     var isRecordingIndicator: Bool {
         if case .recording = self { return true }
-        if case .previewing = self { return true }
         return false
     }
 
@@ -39,7 +36,6 @@ enum RecordingState: Equatable {
 
     var previewText: String? {
         switch self {
-        case .previewing(let text): return text
         case .polishing(let preview): return preview
         default: return nil
         }
@@ -58,6 +54,9 @@ final class AppState: ObservableObject {
 
     // Real-time preview text (AppleSpeech or placeholder)
     @Published var previewText: String = ""
+
+    // Debounced preview text for UI (with hysteresis)
+    @Published var displayedPreviewText: String = ""
 
     // Cloud ASR final result
     @Published var recognizedText: String = ""
@@ -79,6 +78,14 @@ final class AppState: ObservableObject {
     private let stabilityInterval: UInt64 = 800_000_000 // 800ms in nanoseconds
     private(set) var segmentIndex: Int = 0
 
+    // MARK: - Hysteresis / debounce for preview text display
+    private var lastPreviewUpdateTime: Date = .distantPast
+    private var lastDisplayedPreviewUpdateTime: Date = .distantPast
+    private var previewHoldTimer: Timer?
+    private var previewThrottleTask: Task<Void, Never>?
+    private let previewThrottleInterval: TimeInterval = 0.15   // 150ms throttle
+    private let previewHoldDuration: TimeInterval = 1.2        // 1.0-1.5s hold
+
     func transition(to newState: RecordingState) {
         state = newState
 
@@ -94,7 +101,36 @@ final class AppState: ObservableObject {
     func updatePreviewText(_ text: String) {
         draftText = text
         previewText = text
-        state = .previewing(text: text)
+        lastPreviewUpdateTime = Date()
+
+        // Cancel any pending clear timer (new text arrived)
+        previewHoldTimer?.invalidate()
+        previewHoldTimer = nil
+
+        // Cancel any pending throttle task
+        previewThrottleTask?.cancel()
+
+        let now = Date()
+        let timeSinceLastDisplay = now.timeIntervalSince(lastDisplayedPreviewUpdateTime)
+
+        if timeSinceLastDisplay >= previewThrottleInterval {
+            // Enough time has passed since last UI update — update immediately
+            displayedPreviewText = text
+            lastDisplayedPreviewUpdateTime = now
+            schedulePreviewClear()
+        } else {
+            // Too soon — schedule a delayed update
+            let delay = previewThrottleInterval - timeSinceLastDisplay
+            previewThrottleTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self = self, !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.displayedPreviewText = text
+                    self.lastDisplayedPreviewUpdateTime = Date()
+                    self.schedulePreviewClear()
+                }
+            }
+        }
 
         // Phase 2: Cancel previous stability check
         stabilityCheckTask?.cancel()
@@ -120,6 +156,19 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func schedulePreviewClear() {
+        previewHoldTimer?.invalidate()
+        previewHoldTimer = Timer.scheduledTimer(withTimeInterval: previewHoldDuration, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                // Only clear if no new updates arrived since timer started
+                if Date().timeIntervalSince(self.lastPreviewUpdateTime) >= self.previewHoldDuration {
+                    self.displayedPreviewText = ""
+                }
+            }
+        }
+    }
+
     func updateAmplitude(_ value: Float) {
         amplitude = value
     }
@@ -139,12 +188,17 @@ final class AppState: ObservableObject {
         stableText = ""
         draftText = ""
         previewText = ""
+        displayedPreviewText = ""
         recognizedText = ""
         refinedText = ""
         isRefining = false
         segmentIndex = 0
         stabilityCheckTask?.cancel()
         stabilityCheckTask = nil
+        previewHoldTimer?.invalidate()
+        previewHoldTimer = nil
+        previewThrottleTask?.cancel()
+        previewThrottleTask = nil
     }
 
     private func startRecordingTimer() {
