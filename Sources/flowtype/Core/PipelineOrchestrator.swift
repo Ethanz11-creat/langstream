@@ -209,7 +209,8 @@ final class PipelineOrchestrator {
                 let estimatedDuration = Double(audioPayloadSize) / 32000.0
                 print("[PipelineOrchestrator] Final audio: \(finalData.count) bytes, ~\(String(format: "%.1f", estimatedDuration))s")
 
-                self.appState.transition(to: .processingASR(provider: "云端识别"))
+                let providerName = WhisperServerManager.shared.isServerReady ? "本地识别" : "本地识别(兜底)"
+                self.appState.transition(to: .processingASR(provider: providerName))
                 if let result = await self.asyncRefiner.transcribeWithScoring(audioData: finalData) {
                     finalASRText = result.text
                     print("[PipelineOrchestrator] Final segment ASR: '\(finalASRText)'")

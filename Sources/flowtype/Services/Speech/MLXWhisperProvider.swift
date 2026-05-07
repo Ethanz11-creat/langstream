@@ -1,52 +1,22 @@
 import Foundation
 
-class SiliconFlowSpeechProvider: SpeechProvider {
-    let name: String
-    let model: String
-    private let apiKey: String
-    private let baseURL: String
-    private let prompt: String?
+final class MLXWhisperProvider: SpeechProvider {
+    let name: String = "MLXWhisper"
 
-    init(name: String, model: String, prompt: String? = nil, config: ServiceConfig) {
-        self.name = name
-        self.model = model
-        self.prompt = prompt
-        self.apiKey = config.apiKey
-        self.baseURL = config.baseURL
-    }
-
-    func transcribe(audioData: Data, timeout: TimeInterval = 20) async throws -> String {
-        guard !apiKey.isEmpty else {
-            throw SpeechProviderError.transcriptionFailed("API key not configured")
-        }
-
-        guard let url = URL(string: "\(baseURL)/audio/transcriptions") else {
+    func transcribe(audioData: Data, timeout: TimeInterval = 30) async throws -> String {
+        let port = WhisperServerManager.shared.port ?? 8765
+        guard let url = URL(string: "http://127.0.0.1:\(port)/transcribe") else {
             throw SpeechProviderError.transcriptionFailed("Invalid URL")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
         let boundary = UUID().uuidString
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
-        body.append(string: "--\(boundary)\r\n")
-        body.append(string: "Content-Disposition: form-data; name=\"model\"\r\n\r\n")
-        body.append(string: "\(model)\r\n")
-
-        body.append(string: "--\(boundary)\r\n")
-        body.append(string: "Content-Disposition: form-data; name=\"language\"\r\n\r\n")
-        body.append(string: "zh\r\n")
-
-        if let prompt = prompt {
-            body.append(string: "--\(boundary)\r\n")
-            body.append(string: "Content-Disposition: form-data; name=\"prompt\"\r\n\r\n")
-            body.append(string: "\(prompt)\r\n")
-        }
-
         body.append(string: "--\(boundary)\r\n")
         body.append(string: "Content-Disposition: form-data; name=\"file\"; filename=\"recording.wav\"\r\n")
         body.append(string: "Content-Type: audio/wav\r\n\r\n")
@@ -64,7 +34,7 @@ class SiliconFlowSpeechProvider: SpeechProvider {
 
         guard (200...299).contains(httpResponse.statusCode) else {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            print("[\(name)] HTTP error \(httpResponse.statusCode): \(errorText)")
+            print("[MLXWhisper] HTTP error \(httpResponse.statusCode): \(errorText)")
             throw SpeechProviderError.transcriptionFailed("HTTP \(httpResponse.statusCode): \(errorText)")
         }
 

@@ -1,8 +1,6 @@
 import Foundation
 
-/// Manages asynchronous refinement:
-/// 1. Concurrent cloud ASR (TeleSpeech + SenseVoice race with scoring)
-/// 2. Non-blocking LLM polish (UI only)
+/// Manages asynchronous ASR with local MLX Whisper and AppleSpeech fallback.
 @MainActor
 final class AsyncRefiner {
     private let speechRouter: SpeechRouter
@@ -16,110 +14,45 @@ final class AsyncRefiner {
 
     // MARK: - Public API
 
-    /// Transcribe audio using parallel TeleSpeech + SenseVoice with result scoring.
-    /// Falls back to sequential if ASR_STRATEGY=fallback.
+    /// Transcribe audio using MLXWhisper, fall back to AppleSpeech if unavailable or failed.
     func transcribeWithScoring(audioData: Data) async -> TranscriptionResult? {
-        let strategy = Configuration.shared.asrStrategy
+        let serverReady = WhisperServerManager.shared.isServerReady
 
-        if strategy == .fallback {
-            return await transcribeWithFallback(audioData: audioData)
-        }
-
-        // Parallel strategy — async let ensures both start immediately
-        async let teleResult: String? = try? self.speechRouter.primaryProvider.transcribe(
-            audioData: audioData,
-            timeout: 8
-        )
-        async let senseResult: String? = try? self.speechRouter.fallbackProvider.transcribe(
-            audioData: audioData,
-            timeout: 5
-        )
-
-        let teleText = await teleResult
-        let senseText = await senseResult
-
-        var results: [ASRScoredResult] = []
-
-        if let text = teleText, !text.isEmpty {
-            let scored = scorer.score(text, provider: "TeleSpeech")
-            results.append(scored)
-            print("[AsyncRefiner] TeleSpeech raw: '\(text)' score: \(String(format: "%.2f", scored.score))")
-        } else {
-            print("[AsyncRefiner] TeleSpeech failed or empty")
-        }
-
-        if let text = senseText, !text.isEmpty {
-            let scored = scorer.score(text, provider: "SenseVoice")
-            results.append(scored)
-            print("[AsyncRefiner] SenseVoice raw: '\(text)' score: \(String(format: "%.2f", scored.score))")
-        } else {
-            print("[AsyncRefiner] SenseVoice failed or empty")
-        }
-
-        // Try local AppleSpeech as last resort if both cloud providers failed
-        if results.isEmpty {
+        // Primary: MLXWhisper (if server is ready)
+        if serverReady {
             do {
-                let text = try await self.speechRouter.localProvider.transcribe(audioData: audioData, timeout: 10)
+                let text = try await self.speechRouter.primaryProvider.transcribe(
+                    audioData: audioData,
+                    timeout: 30
+                )
                 if !text.isEmpty {
-                    print("[AsyncRefiner] AppleSpeech local fallback succeeded")
-                    return TranscriptionResult(text: text, provider: "AppleSpeech", isFallback: true, duration: 0)
+                    print("[AsyncRefiner] MLXWhisper succeeded: '\(text)'")
+                    return TranscriptionResult(text: text, provider: "MLXWhisper", isFallback: false, duration: 0)
                 }
             } catch {
-                print("[AsyncRefiner] AppleSpeech local fallback failed: \(error)")
+                print("[AsyncRefiner] MLXWhisper failed: \(error)")
             }
+        } else {
+            print("[AsyncRefiner] MLXWhisper server not ready, skipping")
         }
 
-        guard let best = results.max(by: { $0.score < $1.score }) else {
-            return nil
-        }
-
-        let isFallback = best.provider != "TeleSpeech"
-        print("[AsyncRefiner] Selected: \(best.provider) with score \(String(format: "%.2f", best.score))")
-        return TranscriptionResult(text: best.text, provider: best.provider, isFallback: isFallback, duration: 0)
-    }
-
-    /// Original sequential fallback (kept for compatibility and env override).
-    func transcribeWithFallback(audioData: Data) async -> TranscriptionResult? {
-        // TeleSpeech first — usually better quality for Chinese
+        // Fallback: AppleSpeech local (offline)
         do {
-            let text = try await self.speechRouter.primaryProvider.transcribe(
-                audioData: audioData,
-                timeout: 8
-            )
+            let text = try await self.speechRouter.fallbackProvider.transcribe(audioData: audioData, timeout: 10)
             if !text.isEmpty {
-                print("[AsyncRefiner] TeleSpeech succeeded")
-                return TranscriptionResult(text: text, provider: "TeleSpeech", isFallback: false, duration: 0)
-            }
-        } catch {
-            print("[AsyncRefiner] TeleSpeech failed: \(error)")
-        }
-
-        // Fallback to SenseVoice
-        do {
-            let text = try await self.speechRouter.fallbackProvider.transcribe(
-                audioData: audioData,
-                timeout: 5
-            )
-            if !text.isEmpty {
-                print("[AsyncRefiner] SenseVoice fallback succeeded")
-                return TranscriptionResult(text: text, provider: "SenseVoice", isFallback: true, duration: 0)
-            }
-        } catch {
-            print("[AsyncRefiner] SenseVoice fallback failed: \(error)")
-        }
-
-        // Final fallback: local AppleSpeech (offline)
-        do {
-            let text = try await self.speechRouter.localProvider.transcribe(audioData: audioData, timeout: 10)
-            if !text.isEmpty {
-                print("[AsyncRefiner] AppleSpeech local fallback succeeded")
+                print("[AsyncRefiner] AppleSpeech fallback succeeded")
                 return TranscriptionResult(text: text, provider: "AppleSpeech", isFallback: true, duration: 0)
             }
         } catch {
-            print("[AsyncRefiner] AppleSpeech local fallback failed: \(error)")
+            print("[AsyncRefiner] AppleSpeech fallback failed: \(error)")
         }
 
         return nil
+    }
+
+    /// Original sequential fallback (kept for compatibility).
+    func transcribeWithFallback(audioData: Data) async -> TranscriptionResult? {
+        return await transcribeWithScoring(audioData: audioData)
     }
 
     /// LLM polish — UI only, no delta injection
@@ -177,11 +110,5 @@ final class AsyncRefiner {
         } catch {
             print("[AsyncRefiner] Segment LLM failed: \(error)")
         }
-    }
-}
-
-private extension Character {
-    var isChinese: Bool {
-        return "\u{4E00}" <= self && self <= "\u{9FFF}"
     }
 }

@@ -23,14 +23,14 @@ enum TriggerKey: String, Codable, CaseIterable {
     }
 }
 
-enum ASRStrategy: String, Codable, CaseIterable {
-    case parallel
-    case fallback
+enum WhisperLanguage: String, Codable, CaseIterable {
+    case auto, zh, en
 
     var displayName: String {
         switch self {
-        case .parallel: return "并行双发，择优选取"
-        case .fallback: return "主模型优先，失败回退"
+        case .auto: return "自动检测"
+        case .zh: return "中文"
+        case .en: return "English"
         }
     }
 }
@@ -70,35 +70,26 @@ struct ServiceConfig: Codable, Equatable {
 // MARK: - Configuration
 
 struct Configuration: Codable, Equatable {
-    // ASR Primary
-    var asrPrimaryProvider: String
-    var asrPrimaryBaseURL: String
-    var asrPrimaryApiKey: String
-    var asrPrimaryModel: String
-
-    // ASR Fallback
-    var asrFallbackProvider: String
-    var asrFallbackBaseURL: String
-    var asrFallbackApiKey: String
-    var asrFallbackModel: String
+    // Local Whisper ASR
+    var whisperModel: String = "mlx-community/whisper-large-v3-turbo"
+    var whisperLanguage: WhisperLanguage = .auto
 
     // LLM
-    var llmProvider: String
-    var llmBaseURL: String
-    var llmApiKey: String
-    var llmModel: String
+    var llmProvider: String = "SiliconFlow"
+    var llmBaseURL: String = "https://api.siliconflow.cn/v1"
+    var llmApiKey: String = ""
+    var llmModel: String = "deepseek-ai/DeepSeek-V3"
 
     // Other settings
-    var triggerKey: TriggerKey
-    var asrStrategy: ASRStrategy
-    var dumpAudio: Bool
-    var enableFillerStrip: Bool
-    var enableTermCorrection: Bool
+    var triggerKey: TriggerKey = .command
+    var dumpAudio: Bool = false
+    var enableFillerStrip: Bool = true
+    var enableTermCorrection: Bool = true
 
     // Constants
-    let temperature: Double
-    let maxTokens: Int
-    let systemPrompt: String
+    let temperature: Double = 0.3
+    let maxTokens: Int = 2048
+    let systemPrompt: String = ""
 
     // MARK: - Backward Compatibility Accessors
 
@@ -112,33 +103,7 @@ struct Configuration: Codable, Equatable {
         llmBaseURL
     }
 
-    // MARK: - Effective Values (fall back to primary config if fallback is empty)
-
-    var effectiveAsrPrimaryConfig: ServiceConfig {
-        ServiceConfig(
-            provider: asrPrimaryProvider,
-            baseURL: asrPrimaryBaseURL,
-            apiKey: asrPrimaryApiKey.isEmpty ? llmApiKey : asrPrimaryApiKey,
-            model: asrPrimaryModel
-        )
-    }
-
-    var effectiveAsrFallbackConfig: ServiceConfig {
-        let resolvedApiKey: String
-        if !asrFallbackApiKey.isEmpty {
-            resolvedApiKey = asrFallbackApiKey
-        } else if !asrPrimaryApiKey.isEmpty {
-            resolvedApiKey = asrPrimaryApiKey
-        } else {
-            resolvedApiKey = llmApiKey
-        }
-        return ServiceConfig(
-            provider: asrFallbackProvider,
-            baseURL: asrFallbackBaseURL.isEmpty ? asrPrimaryBaseURL : asrFallbackBaseURL,
-            apiKey: resolvedApiKey,
-            model: asrFallbackModel
-        )
-    }
+    // MARK: - Effective Values
 
     var effectiveLLMConfig: ServiceConfig {
         ServiceConfig(
@@ -152,48 +117,16 @@ struct Configuration: Codable, Equatable {
     // MARK: - Default
 
     static let `default` = Configuration(
-        asrPrimaryProvider: "SiliconFlow",
-        asrPrimaryBaseURL: "https://api.siliconflow.cn/v1",
-        asrPrimaryApiKey: "",
-        asrPrimaryModel: "TeleAI/TeleSpeechASR",
-        asrFallbackProvider: "SiliconFlow",
-        asrFallbackBaseURL: "",
-        asrFallbackApiKey: "",
-        asrFallbackModel: "FunAudioLLM/SenseVoiceSmall",
+        whisperModel: "mlx-community/whisper-large-v3-turbo",
+        whisperLanguage: .auto,
         llmProvider: "SiliconFlow",
         llmBaseURL: "https://api.siliconflow.cn/v1",
         llmApiKey: "",
         llmModel: "deepseek-ai/DeepSeek-V3",
         triggerKey: .command,
-        asrStrategy: .parallel,
         dumpAudio: false,
         enableFillerStrip: true,
-        enableTermCorrection: true,
-        temperature: 0.3,
-        maxTokens: 2048,
-        systemPrompt: """
-        你是一位面向 AI 编码场景的语音指令整理助手。
-
-        用户输入的是语音识别后的原始开发需求，通常存在口语化、重复、断句混乱、识别错误和表达跳跃等问题。你的任务是将其整理成一段清晰、准确、边界明确、适合直接发送给 AI 编码助手的指令文本。
-
-        处理时请遵守以下原则：
-
-        1. 修正语音识别错误、错别字和断句问题。
-        2. 删除无意义口头词、重复词和无信息噪音。
-        3. 保持用户原意，不得擅自增加功能、页面、技术实现或需求范围。
-        4. 保留所有关键限制条件，包括：
-        - 修改范围
-        - 不要改动的部分
-        - 优先级
-        - 风格参考
-        - 输出方式
-        5. 将模糊、跳跃的口语整理为自然、清楚、连续的开发指令，但不要强行写成正式文档。
-        6. 如用户表达中包含"先做简单版、局部改、不要重构、只改样式、别动后端"这类边界条件，必须明确保留。
-        7. 不要解释你的处理过程，不要补充建议，不要反问，不要输出多个版本。
-        8. 只输出最终整理后的文本，不要添加任何前缀、说明、引号或客套话。
-        9. 如果输入只包含语气词、口头词、停顿词、无意义重复，或整体上没有可整理的有效内容，例如"嗯""啊""那个""嗯嗯""哦哦"，则不输出任何文字。
-        10. 如果输入信息不足但仍包含少量可保留内容，则只做最小必要修正后输出，不要自行补全。
-        """
+        enableTermCorrection: true
     )
 }
 

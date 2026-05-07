@@ -165,6 +165,174 @@ struct ServiceConfigCard: View {
     }
 }
 
+// MARK: - Local Model Status Card
+
+struct LocalModelStatusCard: View {
+    @StateObject private var serverManager = WhisperServerManager.shared
+    @State private var isInstalling = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                statusIcon
+                    .font(.system(size: 16))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(statusTitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(statusColor)
+                    Text(statusDetail)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                if serverManager.serverStage == .envMissing {
+                    Button(action: runInstallScript) {
+                        if isInstalling {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 60, height: 20)
+                        } else {
+                            Text("一键安装")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isInstalling)
+                }
+            }
+
+            if serverManager.serverStage == .modelLoading {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .frame(height: 4)
+            }
+
+            // Language selector removed from here, moved to parent SettingsView
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(statusColor.opacity(0.3), lineWidth: 1)
+        )
+    }
+
+    private var statusIcon: some View {
+        switch serverManager.serverStage {
+        case .modelLoaded:
+            return Image(systemName: "checkmark.circle.fill")
+        case .modelLoading, .starting, .processStarted, .checking:
+            return Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+        case .envMissing, .notStarted:
+            return Image(systemName: "exclamationmark.circle.fill")
+        case .error:
+            return Image(systemName: "xmark.circle.fill")
+        }
+    }
+
+    private var statusColor: Color {
+        switch serverManager.serverStage {
+        case .modelLoaded:
+            return .green
+        case .modelLoading, .starting, .processStarted, .checking:
+            return .orange
+        case .envMissing, .notStarted:
+            return .red
+        case .error:
+            return .red
+        }
+    }
+
+    private var statusTitle: String {
+        switch serverManager.serverStage {
+        case .modelLoaded:
+            return "本地模型已就绪"
+        case .modelLoading:
+            return "模型加载中..."
+        case .starting, .processStarted, .checking:
+            return "服务启动中..."
+        case .envMissing:
+            return "本地 ASR 未安装"
+        case .notStarted:
+            return "本地 ASR 未启动"
+        case .error:
+            return "服务启动失败"
+        }
+    }
+
+    private var statusDetail: String {
+        switch serverManager.serverStage {
+        case .modelLoaded:
+            return "mlx-community/whisper-large-v3-turbo"
+        case .modelLoading:
+            return "首次加载需要一些时间"
+        case .starting, .processStarted, .checking:
+            return "请稍候..."
+        case .envMissing:
+            return "点击一键安装本地模型环境"
+        case .notStarted:
+            return "重启应用后自动检查"
+        case .error:
+            return serverManager.lastError ?? "未知错误"
+        }
+    }
+
+    private func runInstallScript() {
+        isInstalling = true
+        Task {
+            await installLocalASR()
+            await MainActor.run {
+                isInstalling = false
+            }
+        }
+    }
+
+    private func installLocalASR() async {
+        guard let scriptURL = WhisperSetupChecker.serverDirectory()?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/setup_whisper.sh") else {
+            await MainActor.run {
+                serverManager.lastError = "找不到安装脚本"
+            }
+            return
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = [scriptURL.path]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+
+            if task.terminationStatus == 0 {
+                // Install succeeded, start server
+                await serverManager.startServer()
+            } else {
+                let output = String(data: data, encoding: .utf8) ?? ""
+                await MainActor.run {
+                    serverManager.lastError = "安装失败: \(output)"
+                }
+            }
+        } catch {
+            await MainActor.run {
+                serverManager.lastError = error.localizedDescription
+            }
+        }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
@@ -199,48 +367,44 @@ struct SettingsView: View {
                         Spacer()
                     }
 
-                    Text("配置语音识别服务商。Flowtype 采用双模型兜底架构：主模型优先识别，当主模型失败或质量不佳时自动切换到兜底模型。")
+                    Text("Flowtype 使用本地 MLX Whisper 模型进行语音识别，AppleSpeech 作为兜底方案。所有识别均在本地完成，无需联网。")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    // Primary ASR
-                    ServiceConfigCard(
-                        title: "主识别模型",
-                        subtitle: "优先使用的语音识别服务",
-                        provider: $store.current.asrPrimaryProvider,
-                        baseURL: $store.current.asrPrimaryBaseURL,
-                        apiKey: $store.current.asrPrimaryApiKey,
-                        model: $store.current.asrPrimaryModel,
-                        modelPlaceholder: "例如：TeleAI/TeleSpeechASR"
-                    )
+                    // Local Model Status
+                    LocalModelStatusCard()
 
-                    // Fallback ASR
-                    ServiceConfigCard(
-                        title: "兜底识别模型",
-                        subtitle: "当主模型失败时自动切换",
-                        provider: $store.current.asrFallbackProvider,
-                        baseURL: $store.current.asrFallbackBaseURL,
-                        apiKey: $store.current.asrFallbackApiKey,
-                        model: $store.current.asrFallbackModel,
-                        modelPlaceholder: "例如：FunAudioLLM/SenseVoiceSmall"
-                    )
-
-                    // ASR Strategy
-                    HStack {
-                        Text("识别策略")
+                    // Model ID (read-only display)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("模型 ID")
                             .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Text(store.current.whisperModel)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    // Language selector
+                    HStack {
+                        Text("识别语言")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
                         Spacer()
-                        Picker("", selection: $store.current.asrStrategy) {
-                            ForEach(ASRStrategy.allCases, id: \.self) { strategy in
-                                Text(strategy.displayName).tag(strategy)
+                        Picker("", selection: $store.current.whisperLanguage) {
+                            ForEach(WhisperLanguage.allCases, id: \.self) { lang in
+                                Text(lang.displayName).tag(lang)
                             }
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 260)
+                        .frame(width: 200)
                     }
-                    .padding(.horizontal, 4)
                 }
                 .padding(.horizontal, 4)
 

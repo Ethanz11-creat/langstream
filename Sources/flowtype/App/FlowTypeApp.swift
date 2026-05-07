@@ -31,6 +31,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             PermissionHelper.showPermissionGuide()
         }
 
+        // Check and start local Whisper server in background
+        Task {
+            await WhisperServerManager.shared.checkAndStart()
+        }
+
         WindowManager.fileLog("[AppDelegate] Setting up global hotkey...")
         WindowManager.shared.setupGlobalHotkey()
         WindowManager.fileLog("[AppDelegate] Flowtype launched successfully")

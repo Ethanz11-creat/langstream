@@ -21,17 +21,12 @@ enum EnvMigration {
 
         if let apiKey = env["SILICONFLOW_API_KEY"], !apiKey.isEmpty {
             config.llmApiKey = apiKey
-            config.asrPrimaryApiKey = apiKey
-            config.asrFallbackApiKey = apiKey
             didMigrate = true
         }
         if let baseURL = env["SILICONFLOW_BASE_URL"], !baseURL.isEmpty {
             config.llmBaseURL = baseURL
-            config.asrPrimaryBaseURL = baseURL
             didMigrate = true
         }
-        apply(env["ASR_PRIMARY_MODEL"], to: &config.asrPrimaryModel, didMigrate: &didMigrate)
-        apply(env["ASR_FALLBACK_MODEL"], to: &config.asrFallbackModel, didMigrate: &didMigrate)
         apply(env["LLM_MODEL"], to: &config.llmModel, didMigrate: &didMigrate)
 
         // Migrate from old flat config format if present
@@ -54,11 +49,8 @@ enum EnvMigration {
         struct OldConfiguration: Codable {
             var apiKey: String?
             var baseURL: String?
-            var asrPrimaryModel: String?
-            var asrFallbackModel: String?
             var llmModel: String?
             var triggerKey: TriggerKey?
-            var asrStrategy: ASRStrategy?
         }
 
         guard let old = try? JSONDecoder().decode(OldConfiguration.self, from: data) else {
@@ -69,27 +61,15 @@ enum EnvMigration {
 
         if let apiKey = old.apiKey, !apiKey.isEmpty {
             newConfig.llmApiKey = apiKey
-            newConfig.asrPrimaryApiKey = apiKey
-            newConfig.asrFallbackApiKey = apiKey
         }
         if let baseURL = old.baseURL, !baseURL.isEmpty {
             newConfig.llmBaseURL = baseURL
-            newConfig.asrPrimaryBaseURL = baseURL
-        }
-        if let primaryModel = old.asrPrimaryModel, !primaryModel.isEmpty {
-            newConfig.asrPrimaryModel = primaryModel
-        }
-        if let fallbackModel = old.asrFallbackModel, !fallbackModel.isEmpty {
-            newConfig.asrFallbackModel = fallbackModel
         }
         if let llmModel = old.llmModel, !llmModel.isEmpty {
             newConfig.llmModel = llmModel
         }
         if let triggerKey = old.triggerKey {
             newConfig.triggerKey = triggerKey
-        }
-        if let asrStrategy = old.asrStrategy {
-            newConfig.asrStrategy = asrStrategy
         }
 
         return newConfig

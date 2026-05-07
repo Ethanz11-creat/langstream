@@ -2,14 +2,13 @@ import Foundation
 import AVFoundation
 
 final class SpeechRouter: @unchecked Sendable {
-    let primaryProvider: TeleSpeechProvider
-    let fallbackProvider: SenseVoiceProvider
-    let localProvider: AppleSpeechProvider
+    let primaryProvider: MLXWhisperProvider
+    let fallbackProvider: AppleSpeechProvider
+    let previewProvider: AppleSpeechProvider
 
     init() {
-        let config = Configuration.shared
-        self.primaryProvider = TeleSpeechProvider(config: config.effectiveAsrPrimaryConfig)
-        self.fallbackProvider = SenseVoiceProvider(config: config.effectiveAsrFallbackConfig)
-        self.localProvider = AppleSpeechProvider()
+        self.primaryProvider = MLXWhisperProvider()
+        self.fallbackProvider = AppleSpeechProvider()
+        self.previewProvider = AppleSpeechProvider()
     }
 }
