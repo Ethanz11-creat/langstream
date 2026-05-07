@@ -34,7 +34,7 @@ It helps developers turn spoken, messy, and highly verbal thoughts into clearer 
 
 1. **Record** — Double press `Command` to start voice capture (a capsule window appears at the bottom)
 2. **Preview** — Apple on-device speech recognition shows real-time transcription as you speak
-3. **Transcribe** — Audio is sent to ASR providers (parallel routing with scoring) when recording stops
+3. **Transcribe** — When recording stops, audio is sent to the local MLX Whisper server for high-quality transcription; if the server is unavailable, it falls back to AppleSpeech
 4. **Refine** — LLM cleans up filler words, fixes recognition errors, and structures the prompt (double-press end only)
 5. **Inject** — Result is typed directly into your active text field
 
@@ -51,20 +51,20 @@ Sources/flowtype/
 │   ├── ConfigurationStore.swift       # UserDefaults persistence with debounce
 │   ├── EnvMigration.swift             # One-time .env → GUI migration
 │   ├── PipelineOrchestrator.swift     # End-to-end audio → text pipeline
-│   └── AsyncRefiner.swift             # Parallel ASR + LLM refinement
+│   └── AsyncRefiner.swift             # ASR + LLM refinement
 ├── Services/
 │   ├── AudioRecorder.swift            # macOS audio capture (segmented)
 │   ├── KeyboardInjector.swift         # Text insertion via clipboard / HID
 │   ├── LLMService.swift               # SiliconFlow SSE streaming client
+│   ├── WhisperServerManager.swift     # Python server lifecycle (launch / port / health)
+│   ├── WhisperSetupChecker.swift      # Environment readiness checker
 │   └── Speech/
-│       ├── SpeechRouter.swift         # Multi-provider routing & scoring
+│       ├── SpeechRouter.swift         # Provider routing (MLXWhisper → AppleSpeech fallback)
 │       ├── SpeechProvider.swift       # Protocol
 │       ├── ASRPostProcessor.swift     # Filler stripping, term correction
 │       ├── ASRResultScorer.swift      # 7-dimension quality scoring
 │       ├── AppleSpeechProvider.swift  # On-device speech recognition (preview + fallback)
-│       ├── TeleSpeechProvider.swift
-│       ├── SenseVoiceProvider.swift
-│       └── SiliconFlowSpeechProvider.swift
+│       └── MLXWhisperProvider.swift   # Local MLX Whisper HTTP client
 ├── Settings/
 │   ├── SettingsView.swift             # SwiftUI settings panel
 │   └── SettingsWindowController.swift # Settings window host
@@ -80,23 +80,65 @@ Sources/flowtype/
 │   └── filler_words.json              # Filler word dictionary
 ```
 
+## Model Choice
+
+Flowtype uses [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), a port of OpenAI's Whisper optimized for Apple Silicon via the [MLX framework](https://ml-explore.github.io/mlx/).
+
+### Why MLX
+
+[MLX](https://github.com/ml-explore/mlx) is Apple's machine learning framework built specifically for Apple Silicon. Key advantages for a macOS voice app:
+
+- **Unified memory** — model weights live in system RAM, no VRAM copying overhead
+- **Native Metal backend** — compute shaders run directly on the GPU / Neural Engine
+- **Low latency** — no network round-trip; transcription happens on-device
+- **Privacy** — audio never leaves your machine
+
+### Why `whisper-large-v3-turbo`
+
+The default model is [`mlx-community/whisper-large-v3-turbo`](https://huggingface.co/mlx-community/whisper-large-v3-turbo), a distilled variant of Whisper Large v3 optimized for MLX:
+
+| Model | Size | Speed | Quality | Best For |
+|-------|------|-------|---------|----------|
+| `whisper-large-v3-turbo` | ~1.6 GB | Fast | Excellent | Default — balanced speed & accuracy |
+
+- **Distilled** — trained from Large v3 with fewer decoder layers, achieving near-Large quality at ~2× the speed
+- **MLX-optimized** — weights are pre-converted to MLX format (`.safetensors`), loading and running natively on Apple Silicon
+- **Multilingual** — supports automatic language detection (中文 / English / others) via a single model
+- **Local-only** — runs entirely offline after the one-time download
+
+> **Coming soon**: support for lighter variants such as `whisper-tiny` for users who prefer minimal memory footprint over absolute accuracy.
+
 ## Requirements
 
 - macOS 14+
 - Swift 6.2+
-- [SiliconFlow API key](https://cloud.siliconflow.cn/account/ak) (for LLM refinement and ASR)
+- Apple Silicon (M1 or later) — for local MLX Whisper inference
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — Python package manager
+- [SiliconFlow API key](https://cloud.siliconflow.cn/account/ak) — for LLM text refinement only (ASR is fully local)
 
 ## Setup
 
-```bash
-# 1. Clone
-git clone <repo-url>
-cd Flowtype
+### 1. Install uv (Python manager)
 
-# 2. Build
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 2. Install local ASR environment
+
+```bash
+./scripts/setup_whisper.sh
+```
+
+This creates a Python virtual environment, installs dependencies, and downloads the Whisper model (~1.6 GB). The model is cached globally at `~/.cache/huggingface/hub/`.
+
+### 3. Build & run
+
+```bash
+# Build
 swift build
 
-# 3. Run
+# Run
 swift run FlowType
 ```
 
@@ -113,13 +155,19 @@ All settings are managed through the **Settings GUI** (click the status bar icon
 
 | Section | Settings |
 |----------|---------|
-| **ASR Primary** | Provider, Base URL, API Key, Model ID |
-| **ASR Fallback** | Provider, Base URL, API Key, Model ID |
+| **Local ASR** | Model status, one-click install, language (Auto / 中文 / English) |
 | **LLM** | Provider, Base URL, API Key, Model ID |
 | **Trigger Key** | Fn / Control / Option / Command |
-| **ASR Strategy** | Parallel (run both, pick best) or Fallback (primary first) |
 
 Settings are persisted to `UserDefaults` automatically. An existing `.env` file will be **migrated once** on first launch, after which the GUI settings take precedence.
+
+### ASR fallback behavior
+
+| Scenario | Behavior |
+|----------|----------|
+| Local model ready | MLX Whisper serves final transcription |
+| Local model not installed / loading / crashed | AppleSpeech provides final transcription |
+| Real-time preview | AppleSpeech streams live transcription during recording |
 
 ## ASR Evaluation
 
