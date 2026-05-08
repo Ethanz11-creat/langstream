@@ -32,8 +32,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Check and start local Whisper server in background
+        WindowManager.fileLog("[AppDelegate] Starting WhisperServerManager checkAndStart...")
         Task {
             await WhisperServerManager.shared.checkAndStart()
+            WindowManager.fileLog("[AppDelegate] WhisperServerManager checkAndStart completed, stage=\(WhisperServerManager.shared.serverStage)")
         }
 
         WindowManager.fileLog("[AppDelegate] Setting up global hotkey...")

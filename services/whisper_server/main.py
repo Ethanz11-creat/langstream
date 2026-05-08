@@ -149,6 +149,8 @@ async def transcribe(file: UploadFile = File(...)):
     try:
         import mlx_whisper
 
+        print(f"[whisper] Audio array: {len(audio)} samples, {len(audio)/16000:.2f}s", flush=True)
+
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             executor,
@@ -160,12 +162,35 @@ async def transcribe(file: UploadFile = File(...)):
             ),
         )
 
-        text = result.get("text", "").strip()
+        # Debug: log full result structure
+        result_type = type(result).__name__
+        if hasattr(result, 'get'):
+            text = result.get("text", "").strip()
+            segments = result.get("segments", [])
+            print(f"[whisper] Result type={result_type}, segments={len(segments)}, text_len={len(text)}", flush=True)
+            if segments:
+                for i, seg in enumerate(segments[:5]):
+                    seg_text = seg.get("text", "") if hasattr(seg, 'get') else str(seg)
+                    print(f"[whisper]   seg[{i}]: {seg_text[:60]}", flush=True)
+            # Fallback: build text from segments if top-level text is empty or suspiciously short
+            if not text and segments:
+                text = " ".join(
+                    (seg.get("text", "") if hasattr(seg, 'get') else str(seg)).strip()
+                    for seg in segments
+                ).strip()
+                print(f"[whisper] Rebuilt text from segments: {text[:80]}", flush=True)
+        else:
+            # Result might be a dataclass or namedtuple
+            text = getattr(result, 'text', str(result)).strip()
+            print(f"[whisper] Result type={result_type}, text={text[:80]}", flush=True)
+
         duration = time.time() - start_time
         print(f"[whisper] Transcribed in {duration:.2f}s: {text[:80]}...", flush=True)
         return JSONResponse(content={"text": text})
     except Exception as e:
         print(f"[whisper] Transcription failed: {e}", flush=True, file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return JSONResponse(
             status_code=500,
             content={"error": str(e)},

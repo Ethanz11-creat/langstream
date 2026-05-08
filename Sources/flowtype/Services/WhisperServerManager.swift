@@ -39,13 +39,16 @@ final class WhisperServerManager: ObservableObject, @unchecked Sendable {
     /// If env is missing, sets stage to .envMissing and does NOT auto-install.
     func checkAndStart() async {
         guard serverStage == .notStarted || serverStage == .error else {
+            WindowManager.fileLog("[WhisperServerManager] checkAndStart: already in progress or ready (stage=\(serverStage))")
             return // Already in progress or ready
         }
 
         serverStage = .checking
         lastError = nil
+        WindowManager.fileLog("[WhisperServerManager] Checking environment...")
 
         let status = await WhisperSetupChecker.check()
+        WindowManager.fileLog("[WhisperServerManager] Environment check result: \(status)")
 
         if !status.isReady {
             serverStage = .envMissing
@@ -103,16 +106,22 @@ final class WhisperServerManager: ObservableObject, @unchecked Sendable {
 
     private func launchPythonProcess() async throws {
         guard let serverDir = WhisperSetupChecker.serverDirectory() else {
+            WindowManager.fileLog("[WhisperServerManager] launchPythonProcess: serverDirectory not found")
             throw ServerError.serverDirectoryNotFound
         }
+        WindowManager.fileLog("[WhisperServerManager] launchPythonProcess: serverDir=\(serverDir.path)")
 
         let pythonPath = serverDir.appendingPathComponent(".venv/bin/python")
         let mainPyPath = serverDir.appendingPathComponent("main.py")
+        WindowManager.fileLog("[WhisperServerManager] pythonPath=\(pythonPath.path), exists=\(FileManager.default.fileExists(atPath: pythonPath.path))")
+        WindowManager.fileLog("[WhisperServerManager] mainPyPath=\(mainPyPath.path), exists=\(FileManager.default.fileExists(atPath: mainPyPath.path))")
 
         guard FileManager.default.fileExists(atPath: pythonPath.path) else {
+            WindowManager.fileLog("[WhisperServerManager] Python not found at \(pythonPath.path)")
             throw ServerError.pythonNotFound
         }
         guard FileManager.default.fileExists(atPath: mainPyPath.path) else {
+            WindowManager.fileLog("[WhisperServerManager] main.py not found at \(mainPyPath.path)")
             throw ServerError.mainScriptNotFound
         }
 
@@ -129,10 +138,11 @@ final class WhisperServerManager: ObservableObject, @unchecked Sendable {
         ]
         task.currentDirectoryURL = serverDir
 
-        // Capture stdout to read SERVER_PORT
+        // Capture stdout + stderr to read SERVER_PORT and any errors
         let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
         task.standardOutput = stdoutPipe
-        task.standardError = FileHandle.nullDevice
+        task.standardError = stderrPipe
 
         // Set up termination handler
         task.terminationHandler = { [weak self] process in
@@ -148,40 +158,59 @@ final class WhisperServerManager: ObservableObject, @unchecked Sendable {
 
         try task.run()
         self.process = task
+        WindowManager.fileLog("[WhisperServerManager] Python process launched, waiting for port...")
+
+        // Start background stderr reader so errors are logged
+        Task {
+            let errHandle = stderrPipe.fileHandleForReading
+            while let data = try? errHandle.read(upToCount: 512), !data.isEmpty {
+                if let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+                    WindowManager.fileLog("[WhisperServer-stderr] \(str)")
+                }
+            }
+        }
 
         // Read stdout asynchronously to find SERVER_PORT
-        let port = try await self.readPortFromStdout(pipe: stdoutPipe, timeout: 10)
+        let port = try await self.readPortFromStdout(pipe: stdoutPipe, timeout: 15)
 
         guard let port = port else {
+            WindowManager.fileLog("[WhisperServerManager] Failed to read port from stdout")
             task.terminate()
             throw ServerError.portNotReceived
         }
 
         self._serverPort = port
-        print("[WhisperServerManager] Python process started, port \(port)")
+        WindowManager.fileLog("[WhisperServerManager] Python process started, port \(port)")
     }
 
-    private func readPortFromStdout(pipe: Pipe, timeout: TimeInterval = 10) async throws -> Int? {
+    private func readPortFromStdout(pipe: Pipe, timeout: TimeInterval = 15) async throws -> Int? {
         let handle = pipe.fileHandleForReading
         let deadline = Date().addingTimeInterval(timeout)
+        var accumulatedOutput = ""
 
         while Date() < deadline {
             if Task.isCancelled {
                 return nil
             }
 
-            if let data = try? handle.read(upToCount: 1024), !data.isEmpty {
+            // Use availableData instead of read(upToCount:) to avoid blocking
+            let data = handle.availableData
+            if !data.isEmpty {
                 if let str = String(data: data, encoding: .utf8) {
-                    // Look for SERVER_PORT=xxxx pattern
-                    if let match = str.range(of: "SERVER_PORT=") {
-                        let start = str.index(match.upperBound, offsetBy: 0)
-                        let remainder = String(str[start...])
+                    accumulatedOutput += str
+                    WindowManager.fileLog("[WhisperServerManager] stdout chunk: \(str.prefix(200).replacingOccurrences(of: "\n", with: "\\n"))")
+                    // Look for SERVER_PORT=xxxx pattern anywhere in accumulated output
+                    if let match = accumulatedOutput.range(of: "SERVER_PORT=") {
+                        let start = accumulatedOutput.index(match.upperBound, offsetBy: 0)
+                        let remainder = String(accumulatedOutput[start...])
                         if let newlineRange = remainder.range(of: "\n") {
                             let portStr = String(remainder[..<newlineRange.lowerBound])
                             if let port = Int(portStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                                WindowManager.fileLog("[WhisperServerManager] Found SERVER_PORT=\(port)")
                                 return port
                             }
                         } else if let port = Int(remainder.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                            WindowManager.fileLog("[WhisperServerManager] Found SERVER_PORT=\(port)")
                             return port
                         }
                     }
@@ -191,6 +220,7 @@ final class WhisperServerManager: ObservableObject, @unchecked Sendable {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
 
+        WindowManager.fileLog("[WhisperServerManager] Port read timeout. Accumulated output: \(accumulatedOutput.prefix(500).replacingOccurrences(of: "\n", with: "\\n"))")
         return nil
     }
 

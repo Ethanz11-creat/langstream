@@ -94,7 +94,8 @@ final class AppState: ObservableObject {
     func updatePreviewText(_ text: String) {
         draftText = text
         previewText = text
-        state = .previewing(text: text)
+        // Keep the recording state while previewing; the UI shows
+        // "Listening..." with the live transcript in the subtitle.
 
         // Phase 2: Cancel previous stability check
         stabilityCheckTask?.cancel()

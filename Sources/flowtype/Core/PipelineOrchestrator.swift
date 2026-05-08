@@ -112,15 +112,23 @@ final class PipelineOrchestrator {
                 print("[PipelineOrchestrator] AudioRecorder started")
 
                 // 2.5 Set up real-time AppleSpeech preview (on-device, offline)
+                WindowManager.fileLog("[PipelineOrchestrator] Setting up AppleSpeech real-time preview...")
                 self.audioRecorder.onAudioBuffer = { [weak self] buffer in
                     self?.appleSpeechProvider.appendAudioBuffer(buffer)
                 }
-                let previewStream = self.appleSpeechProvider.startStreamingRecognition()
+                let previewStream = await self.appleSpeechProvider.startStreamingRecognition()
+                WindowManager.fileLog("[PipelineOrchestrator] AppleSpeech preview stream created")
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
+                    var previewCount = 0
                     for await text in previewStream {
+                        previewCount += 1
+                        if previewCount <= 3 || previewCount % 10 == 0 {
+                            WindowManager.fileLog("[PipelineOrchestrator] Preview update #\(previewCount): '\(text.prefix(40))'")
+                        }
                         self.appState.updatePreviewText(text)
                     }
+                    WindowManager.fileLog("[PipelineOrchestrator] Preview stream ended, total updates=\(previewCount)")
                 }
 
                 // 3. Consume segment stream in background — each 60s chunk gets ASR’d immediately

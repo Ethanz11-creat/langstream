@@ -27,31 +27,40 @@ enum WhisperSetupStatus: Equatable, CustomStringConvertible {
 
 struct WhisperSetupChecker {
     /// Locate the whisper_server directory relative to the project.
+    /// Prefers paths that have a `.venv` directory already created.
     static func serverDirectory() -> URL? {
         let fm = FileManager.default
-
-        // 1. Try relative to current working directory (dev mode)
-        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
-        let cwdPath = cwd.appendingPathComponent("services/whisper_server")
-        if fm.fileExists(atPath: cwdPath.path) {
-            return cwdPath
-        }
-
-        // 2. Try relative to executable path
         let execPath = CommandLine.arguments[0]
         let execDir = URL(fileURLWithPath: execPath).deletingLastPathComponent()
-        let execRelPath = execDir.appendingPathComponent("services/whisper_server")
-        if fm.fileExists(atPath: execRelPath.path) {
-            return execRelPath
-        }
 
-        // 3. Try two levels up from executable (Swift build products)
-        let execRelPath2 = execDir.deletingLastPathComponent().appendingPathComponent("services/whisper_server")
-        if fm.fileExists(atPath: execRelPath2.path) {
-            return execRelPath2
-        }
+        let candidates: [URL] = [
+            // 1. Dev mode: current working directory
+            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("services/whisper_server"),
+            // 2. Swift build products: two levels up from executable
+            execDir.deletingLastPathComponent().appendingPathComponent("services/whisper_server"),
+            // 3. .app bundle parent directory (project root when running from build/)
+            // From: build/Flowtype.app/Contents/MacOS/FlowType
+            // Up 1: Contents/MacOS/ → up 2: Flowtype.app/ → up 3: build/ → up 4: project root
+            execDir.deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("services/whisper_server"),
+            // 4. .app bundle Resources
+            execDir.deletingLastPathComponent().appendingPathComponent("Resources/services/whisper_server"),
+            // 5. Relative to executable path
+            execDir.appendingPathComponent("services/whisper_server"),
+        ]
 
-        return nil
+        var firstMatch: URL?
+        for path in candidates {
+            if fm.fileExists(atPath: path.path) {
+                if firstMatch == nil { firstMatch = path }
+                let venvPath = path.appendingPathComponent(".venv")
+                if fm.fileExists(atPath: venvPath.path) {
+                    return path // Prefer path with .venv already set up
+                }
+            }
+        }
+        return firstMatch
     }
 
     static func check() async -> WhisperSetupStatus {
@@ -90,9 +99,11 @@ struct WhisperSetupChecker {
     }
 
     static func checkUV() -> Bool {
+        // Use bash with the user's PATH to find uv, since `which` alone
+        // only searches the system default PATH and misses e.g. ~/.local/bin.
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        task.arguments = ["uv"]
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-lc", "command -v uv"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         do {

@@ -21,11 +21,21 @@ struct CapsuleView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white)
 
-                // Display text with fallback for empty preview
-                Text(statusSubtitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(statusColor.opacity(0.7))
-                    .lineLimit(1)
+                // Timer + preview on one line; timer stays visible, preview scrolls visually
+                HStack(spacing: 4) {
+                    if let timer = recordingTimerText {
+                        Text(timer)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(statusColor.opacity(0.7))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+
+                    Text(statusSubtitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(statusColor.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
             }
 
             Spacer()
@@ -99,18 +109,20 @@ struct CapsuleView: View {
         }
     }
 
+    /// Timer text shown during recording (e.g. "00:12"); nil for other states.
+    private var recordingTimerText: String? {
+        if case .recording(let seconds) = appState.state {
+            return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        }
+        return nil
+    }
+
     private var statusSubtitle: String {
         switch appState.state {
         case .idle: return "双击 Option 开始"
         case .requestingPermission: return ""
-        case .recording(let seconds):
-            // During recording: show timer + preview text (or placeholder)
-            let timer = String(format: "%02d:%02d", seconds / 60, seconds % 60)
-            if appState.previewText.isEmpty {
-                return "\(timer) · 正在听写..."
-            } else {
-                return "\(timer) · \(appState.previewText)"
-            }
+        case .recording:
+            return appState.previewText.isEmpty ? "正在听写..." : appState.previewText
         case .previewing:
             return appState.previewText.isEmpty ? "正在听写..." : appState.previewText
         case .processingASR:

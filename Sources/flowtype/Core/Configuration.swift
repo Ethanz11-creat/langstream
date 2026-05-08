@@ -118,7 +118,7 @@ struct Configuration: Codable, Equatable {
 
     static let `default` = Configuration(
         whisperModel: "mlx-community/whisper-large-v3-turbo",
-        whisperLanguage: .auto,
+        whisperLanguage: .zh,
         llmProvider: "SiliconFlow",
         llmBaseURL: "https://api.siliconflow.cn/v1",
         llmApiKey: "",

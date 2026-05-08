@@ -23,6 +23,15 @@ cp Sources/flowtype/Resources/*.json build/${APP_NAME}.app/Contents/Resources/ 2
 cp Sources/flowtype/Resources/*.icns build/${APP_NAME}.app/Contents/Resources/ 2>/dev/null || true
 cp Sources/flowtype/Resources/status_bar_icon*.png build/${APP_NAME}.app/Contents/Resources/ 2>/dev/null || true
 
+# Copy local ASR Python service into bundle
+echo "📦 Copying whisper_server into app bundle..."
+mkdir -p build/${APP_NAME}.app/Contents/Resources/services/whisper_server
+cp -R services/whisper_server/* build/${APP_NAME}.app/Contents/Resources/services/whisper_server/ 2>/dev/null || true
+
+# Copy install script into bundle (used by SettingsView "one-click install" button)
+mkdir -p build/${APP_NAME}.app/Contents/Resources/scripts
+cp scripts/setup_whisper.sh build/${APP_NAME}.app/Contents/Resources/scripts/ 2>/dev/null || true
+
 # Generate Info.plist
 cat > build/${APP_NAME}.app/Contents/Info.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
