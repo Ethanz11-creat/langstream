@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-APP_NAME="Flowtype"
+APP_NAME="FlowType"
 VERSION="1.0.0"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 BUILD_DIR="build"

@@ -15,6 +15,9 @@ struct RecordingOutput: @unchecked Sendable {
     /// Emitted whenever the 60s buffer fills up; the final partial segment is
     /// NOT emitted here — it is returned by `stopRecording()`.
     let segments: AsyncStream<Data>
+    /// Real-time audio slice stream for parallel ASR.
+    /// Each slice is a short WAV segment suitable for immediate transcription.
+    let slices: AsyncStream<AudioSlice>
 }
 
 final class AudioRecorder: @unchecked Sendable {
@@ -23,6 +26,12 @@ final class AudioRecorder: @unchecked Sendable {
     private nonisolated(unsafe) var audioBuffer: AVAudioPCMBuffer?
     private nonisolated(unsafe) var amplitudeContinuation: AsyncStream<Float>.Continuation?
     private nonisolated(unsafe) var segmentContinuation: AsyncStream<Data>.Continuation?
+
+    // Accumulated 60s segments (internal, since callers may not consume the segment stream).
+    private nonisolated(unsafe) var recordedSegments: [Data] = []
+
+    // Real-time audio slicer for parallel ASR
+    private var audioSlicer: AudioSlicer?
 
     // Recording state — protected by stateLock because accessed from both
     // main thread (start/stop) and audio tap callback thread.
@@ -44,6 +53,16 @@ final class AudioRecorder: @unchecked Sendable {
     /// Called on the audio tap thread with the converted 16kHz mono float32 buffer.
     var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
 
+    /// Called when no audio tap callbacks have been received for a while (recording freeze).
+    var onRecordingFrozen: (() -> Void)?
+
+    // MARK: - Heartbeat detection
+    private nonisolated(unsafe) var lastTapCallCount = 0
+    private nonisolated(unsafe) var lastTapTimestamp: Date?
+    private var heartbeatTimer = CancellableTimer()
+    private let heartbeatInterval: TimeInterval = 2.0
+    private let heartbeatTimeout: TimeInterval = 5.0
+
     /// Check current microphone permission status without triggering a dialog.
     /// Returns raw value: 0=undetermined, 1=denied, 2=granted
     func authorizationStatus() -> Int {
@@ -57,11 +76,11 @@ final class AudioRecorder: @unchecked Sendable {
         let status = AVAudioApplication.shared.recordPermission
         // macOS uses FourCC values ('undt', 'deny', 'grnt'), not 0/1/2.
         // Compare enum cases directly instead of rawValue.
-        WindowManager.fileLog("AudioRecorder: mic status = \(status) (undetermined/denied/granted)")
+        AppLogger.log("AudioRecorder: mic status = \(status) (undetermined/denied/granted)")
 
         // Only request if undetermined; if already denied, don't re-prompt
         guard status == .undetermined else {
-            WindowManager.fileLog("AudioRecorder: mic status is not undetermined, skipping request")
+            AppLogger.log("AudioRecorder: mic status is not undetermined, skipping request")
             return status == .granted
         }
 
@@ -70,7 +89,7 @@ final class AudioRecorder: @unchecked Sendable {
                 continuation.resume(returning: granted)
             }
         }
-        WindowManager.fileLog("AudioRecorder: mic request result = \(granted)")
+        AppLogger.log("AudioRecorder: mic request result = \(granted)")
         return granted
     }
 
@@ -83,6 +102,17 @@ final class AudioRecorder: @unchecked Sendable {
         // Fresh engine for each session
         let freshEngine = AVAudioEngine()
         self.engine = freshEngine
+
+        // Start real-time audio slicer
+        let slicer = AudioSlicer()
+        let config = Configuration.shared
+        slicer.maxSliceDuration = config.sliceMaxDuration
+        slicer.minSliceDuration = config.sliceMinDuration
+        slicer.silenceThresholdDB = config.sliceSilenceThresholdDB
+        slicer.silenceDuration = config.sliceSilenceDuration
+        slicer.overlapDuration = config.sliceOverlapDuration
+        self.audioSlicer = slicer
+        let sliceStream = slicer.startSlicing()
 
         let inputNode = freshEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -103,13 +133,30 @@ final class AudioRecorder: @unchecked Sendable {
         }
 
         audioBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000 * 60)!
+        recordedSegments = []
         stateLock.withLock {
             _isRecording = true
             _isStopping = false
         }
         tapCallCount = 0
+        lastTapCallCount = 0
+        lastTapTimestamp = Date()
+        heartbeatTimer.schedule(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] in
+            guard let self = self else { return }
+            guard self.isRecording && !self.isStopping else { return }
+            let currentCount = self.tapCallCount
+            let now = Date()
+            if currentCount > self.lastTapCallCount {
+                self.lastTapCallCount = currentCount
+                self.lastTapTimestamp = now
+            } else if let lastTap = self.lastTapTimestamp, now.timeIntervalSince(lastTap) > self.heartbeatTimeout {
+                print("[AudioRecorder] HEARTBEAT FAILURE: No tap callbacks for \(self.heartbeatTimeout)s. Auto-stopping.")
+                self.heartbeatTimer.cancel()
+                self.onRecordingFrozen?()
+            }
+        }
 
-        // Segment stream — emitted when 60s buffer rolls over
+        // Segment stream — emitted when 60s buffer rolls over (legacy)
         let segmentStream = AsyncStream<Data> { continuation in
             self.segmentContinuation = continuation
         }
@@ -159,6 +206,9 @@ final class AudioRecorder: @unchecked Sendable {
                 // Forward to streaming recognizer (e.g., AppleSpeech) for real-time preview
                 self.onAudioBuffer?(convertedBuffer)
 
+                // Feed to real-time slicer for parallel ASR
+                self.audioSlicer?.appendBuffer(convertedBuffer)
+
                 // Append to accumulated full buffer
                 if let mainBuffer = self.audioBuffer,
                    let mainData = mainBuffer.floatChannelData?[0],
@@ -175,6 +225,7 @@ final class AudioRecorder: @unchecked Sendable {
                         // Buffer full: flush as a completed segment, reset, then append
                         print("[AudioRecorder] Tap #\(callIndex): audioBuffer full (60s), flushing segment")
                         if let wavData = AudioFormatConverter.normalizeAndConvertToWAV(mainBuffer) {
+                            self.recordedSegments.append(wavData)
                             self.segmentContinuation?.yield(wavData)
                         }
                         mainBuffer.frameLength = 0
@@ -209,15 +260,9 @@ final class AudioRecorder: @unchecked Sendable {
                 continuation.finish()
             }
 
-            continuation.onTermination = { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self = self, !self.isRecording && !self.isStopping else { return }
-                    _ = self.stopRecording()
-                }
-            }
         }
 
-        return RecordingOutput(amplitude: amplitudeStream, segments: segmentStream)
+        return RecordingOutput(amplitude: amplitudeStream, segments: segmentStream, slices: sliceStream)
     }
 
     /// Stops recording and returns all audio data.
@@ -226,6 +271,18 @@ final class AudioRecorder: @unchecked Sendable {
     nonisolated func stopRecording() -> (segments: [Data], finalData: Data?) {
         print("[AudioRecorder] stopRecording called, tapCallCount=\(tapCallCount)")
 
+        // Idempotent guard: if already stopped, return empty
+        let wasRecording = stateLock.withLock {
+            let was = _isRecording || _isStopping
+            _isStopping = true
+            _isRecording = false
+            return was
+        }
+        if !wasRecording {
+            print("[AudioRecorder] stopRecording: already stopped, returning empty")
+            return ([], nil)
+        }
+
         if tapCallCount == 0 {
             print("[AudioRecorder] CRITICAL: No tap callbacks received. Possible causes:")
             print("  - Microphone permission denied (check System Settings > Privacy > Microphone)")
@@ -233,15 +290,16 @@ final class AudioRecorder: @unchecked Sendable {
             print("  - AVAudioEngine failed to start")
         }
 
-        // Graceful stop: tell tap callbacks to finish their current frame
-        stateLock.withLock {
-            _isStopping = true
-            _isRecording = false
-        }
+        heartbeatTimer.cancel()
+        lastTapTimestamp = nil
         amplitudeContinuation?.finish()
         amplitudeContinuation = nil
         segmentContinuation?.finish()
         segmentContinuation = nil
+
+        // Stop real-time slicer and emit final slice
+        audioSlicer?.finishSlicing()
+        audioSlicer = nil
 
         // Stop engine and remove tap
         engine?.stop()
@@ -251,13 +309,13 @@ final class AudioRecorder: @unchecked Sendable {
             _isStopping = false
         }
 
-        // Note: segmentContinuation yielded segments as they completed.
-        // We don't have a local buffer here; segments were consumed by the caller.
-        // The "finalData" is the last partial buffer.
+        // Combine internally accumulated segments with the final partial buffer.
+        let allSegments = self.recordedSegments
+        self.recordedSegments = []
 
         guard let buffer = audioBuffer else {
             print("[AudioRecorder] stopRecording: audioBuffer is nil")
-            return ([], nil)
+            return (allSegments, nil)
         }
 
         let rawFrames = Int(buffer.frameLength)
@@ -283,7 +341,7 @@ final class AudioRecorder: @unchecked Sendable {
             dumpWAVData(data)
         }
 
-        return ([], finalData)
+        return (allSegments, finalData)
     }
 
     private func dumpWAVData(_ data: Data) {

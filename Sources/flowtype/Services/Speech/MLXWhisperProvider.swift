@@ -3,7 +3,7 @@ import Foundation
 final class MLXWhisperProvider: SpeechProvider {
     let name: String = "MLXWhisper"
 
-    func transcribe(audioData: Data, timeout: TimeInterval = 30) async throws -> String {
+    func transcribe(audioData: Data, timeout: TimeInterval = 300) async throws -> String {
         let port = WhisperServerManager.shared.port ?? 8765
         guard let url = URL(string: "http://127.0.0.1:\(port)/transcribe") else {
             throw SpeechProviderError.transcriptionFailed("Invalid URL")

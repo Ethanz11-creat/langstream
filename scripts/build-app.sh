@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-APP_NAME="Flowtype"
+APP_NAME="FlowType"
 BUNDLE_ID="com.flowtype.app"
 VERSION="1.0.0"
 BUILD_NUMBER="1"
 
-echo "Building Flowtype.app..."
+echo "Building FlowType.app..."
 
 # Build release binary
 swift build -c release
@@ -32,6 +32,26 @@ cp -R services/whisper_server/* build/${APP_NAME}.app/Contents/Resources/service
 mkdir -p build/${APP_NAME}.app/Contents/Resources/scripts
 cp scripts/setup_whisper.sh build/${APP_NAME}.app/Contents/Resources/scripts/ 2>/dev/null || true
 
+# Download and bundle uv binary (so users don't need uv pre-installed)
+UV_VERSION="0.7.2"
+UV_ARCH=$(uname -m)
+if [ "$UV_ARCH" = "arm64" ]; then
+    UV_PLATFORM="aarch64-apple-darwin"
+else
+    UV_PLATFORM="x86_64-apple-darwin"
+fi
+UV_DIR="build/${APP_NAME}.app/Contents/Resources/bin"
+mkdir -p "$UV_DIR"
+if [ ! -f "$UV_DIR/uv" ]; then
+    echo "📦 Downloading uv ${UV_VERSION} (${UV_PLATFORM})..."
+    curl -sL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_PLATFORM}.tar.gz" \
+        | tar xz -C "$UV_DIR" --strip-components=1 --include='*/uv'
+    chmod +x "$UV_DIR/uv"
+    echo "✅ uv bundled at ${UV_DIR}/uv"
+else
+    echo "✅ uv already bundled"
+fi
+
 # Generate Info.plist
 cat > build/${APP_NAME}.app/Contents/Info.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,9 +61,9 @@ cat > build/${APP_NAME}.app/Contents/Info.plist << 'EOF'
     <key>CFBundleIdentifier</key>
     <string>com.flowtype.app</string>
     <key>CFBundleName</key>
-    <string>Flowtype</string>
+    <string>FlowType</string>
     <key>CFBundleDisplayName</key>
-    <string>Flowtype</string>
+    <string>FlowType</string>
     <key>CFBundleExecutable</key>
     <string>FlowType</string>
     <key>CFBundleIconFile</key>
@@ -54,12 +74,18 @@ cat > build/${APP_NAME}.app/Contents/Info.plist << 'EOF'
     <string>1.0.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Flowtype 需要麦克风权限来录制你的语音输入。</string>
+    <string>FlowType needs microphone access to record your voice input.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Flowtype 需要语音识别权限将语音转换为文字。</string>
+    <string>FlowType needs speech recognition access to convert voice to text.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>FlowType needs accessibility access to detect global hotkeys and inject text into other applications.</string>
 </dict>
 </plist>
 EOF
@@ -76,6 +102,6 @@ echo "✅ build/${APP_NAME}.app created successfully"
 echo ""
 echo "📦 App bundle: $(pwd)/build/${APP_NAME}.app"
 echo "⚠️  IMPORTANT: This is an ad-hoc signed build."
+echo "   - First-time users: right-click the app → Open, or run: xattr -cr build/${APP_NAME}.app"
 echo "   - Microphone permission dialog may require quitting and relaunching the app."
 echo "   - Accessibility permission must be granted manually in System Settings."
-echo "   - See FIRST_LAUNCH.md for detailed setup instructions."

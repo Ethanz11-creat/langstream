@@ -96,6 +96,47 @@ struct ModelIDField: View {
     }
 }
 
+// MARK: - Install Progress Banner
+
+struct InstallProgressBanner: View {
+    @ObservedObject var manager: WhisperServerManager = .shared
+    var onRetry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if manager.serverStage.isInstalling {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(manager.serverStage.statusTitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.orange)
+                }
+                if let detail = manager.installDetail {
+                    Text(detail)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            if manager.serverStage == .error, let error = manager.lastError {
+                Text(error)
+                    .font(.system(size: 12))
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Button("重试", action: onRetry)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("查看日志") { AppLogger.openLogInFinder() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Service Config Card
 
 struct ServiceConfigCard: View {
@@ -168,19 +209,20 @@ struct ServiceConfigCard: View {
 // MARK: - Local Model Status Card
 
 struct LocalModelStatusCard: View {
-    @StateObject private var serverManager = WhisperServerManager.shared
-    @State private var isInstalling = false
+    @StateObject private var manager = WhisperServerManager.shared
+    @State private var cachedModelSize: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                statusIcon
+                Image(systemName: manager.serverStage.iconName)
                     .font(.system(size: 16))
+                    .foregroundColor(manager.serverStage.statusColor)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(statusTitle)
+                    Text(manager.serverStage.statusTitle)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(statusColor)
+                        .foregroundColor(manager.serverStage.statusColor)
                     Text(statusDetail)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -188,30 +230,25 @@ struct LocalModelStatusCard: View {
 
                 Spacer()
 
-                if serverManager.serverStage == .envMissing {
-                    Button(action: runInstallScript) {
-                        if isInstalling {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 60, height: 20)
-                        } else {
-                            Text("一键安装")
-                                .font(.system(size: 12, weight: .medium))
-                        }
+                if manager.serverStage.canInstall {
+                    Button(action: { Task { await manager.install() } }) {
+                        Text("一键安装")
+                            .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(isInstalling)
                 }
             }
 
-            if serverManager.serverStage == .modelLoading {
+            if manager.serverStage == .modelLoading || manager.serverStage == .restarting {
                 ProgressView()
                     .progressViewStyle(.linear)
                     .frame(height: 4)
             }
 
-            // Language selector removed from here, moved to parent SettingsView
+            if manager.serverStage.isInstalling || manager.serverStage == .error {
+                InstallProgressBanner(onRetry: { Task { await manager.retry() } })
+            }
         }
         .padding(14)
         .background(
@@ -221,114 +258,37 @@ struct LocalModelStatusCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(statusColor.opacity(0.3), lineWidth: 1)
+                .stroke(manager.serverStage.statusColor.opacity(0.3), lineWidth: 1)
         )
-    }
-
-    private var statusIcon: some View {
-        switch serverManager.serverStage {
-        case .modelLoaded:
-            return Image(systemName: "checkmark.circle.fill")
-        case .modelLoading, .starting, .processStarted, .checking:
-            return Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-        case .envMissing, .notStarted:
-            return Image(systemName: "exclamationmark.circle.fill")
-        case .error:
-            return Image(systemName: "xmark.circle.fill")
-        }
-    }
-
-    private var statusColor: Color {
-        switch serverManager.serverStage {
-        case .modelLoaded:
-            return .green
-        case .modelLoading, .starting, .processStarted, .checking:
-            return .orange
-        case .envMissing, .notStarted:
-            return .red
-        case .error:
-            return .red
-        }
-    }
-
-    private var statusTitle: String {
-        switch serverManager.serverStage {
-        case .modelLoaded:
-            return "本地模型已就绪"
-        case .modelLoading:
-            return "模型加载中..."
-        case .starting, .processStarted, .checking:
-            return "服务启动中..."
-        case .envMissing:
-            return "本地 ASR 未安装"
-        case .notStarted:
-            return "本地 ASR 未启动"
-        case .error:
-            return "服务启动失败"
+        .onAppear {
+            cachedModelSize = WhisperSetupChecker.modelCacheSize()
         }
     }
 
     private var statusDetail: String {
-        switch serverManager.serverStage {
-        case .modelLoaded:
+        switch manager.serverStage {
+        case .ready:
+            if let size = cachedModelSize {
+                return "mlx-community/whisper-large-v3-turbo (\(size))"
+            }
             return "mlx-community/whisper-large-v3-turbo"
         case .modelLoading:
             return "首次加载需要一些时间"
         case .starting, .processStarted, .checking:
             return "请稍候..."
-        case .envMissing:
+        case .restarting:
+            return manager.lastError ?? "正在自动恢复..."
+        case .installingVenv, .installingDeps, .downloadingModel:
+            return manager.installDetail ?? manager.serverStage.rawValue
+        case .needsInstall:
+            if WhisperSetupChecker.checkModelCache() {
+                return "模型已缓存，仅需安装 Python 依赖"
+            }
             return "点击一键安装本地模型环境"
         case .notStarted:
             return "重启应用后自动检查"
         case .error:
-            return serverManager.lastError ?? "未知错误"
-        }
-    }
-
-    private func runInstallScript() {
-        isInstalling = true
-        Task {
-            await installLocalASR()
-            await MainActor.run {
-                isInstalling = false
-            }
-        }
-    }
-
-    private func installLocalASR() async {
-        guard let scriptURL = WhisperSetupChecker.serverDirectory()?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/setup_whisper.sh") else {
-            await MainActor.run {
-                serverManager.lastError = "找不到安装脚本"
-            }
-            return
-        }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = [scriptURL.path]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-
-            if task.terminationStatus == 0 {
-                // Install succeeded, start server
-                await serverManager.startServer()
-            } else {
-                let output = String(data: data, encoding: .utf8) ?? ""
-                await MainActor.run {
-                    serverManager.lastError = "安装失败: \(output)"
-                }
-            }
-        } catch {
-            await MainActor.run {
-                serverManager.lastError = error.localizedDescription
-            }
+            return manager.lastError ?? "未知错误"
         }
     }
 }
@@ -404,6 +364,14 @@ struct SettingsView: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 200)
+                        .onChange(of: store.current.whisperLanguage) { _, newLang in
+                            // Restart the Whisper server so the new language takes effect immediately.
+                            Task {
+                                WhisperServerManager.shared.stopServer()
+                                await WhisperServerManager.shared.checkAndStart()
+                                AppLogger.log("[Settings] Language changed to \(newLang.rawValue), server restarted")
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 4)
@@ -437,6 +405,39 @@ struct SettingsView: View {
                         model: $store.current.llmModel,
                         modelPlaceholder: "例如：deepseek-ai/DeepSeek-V3"
                     )
+
+                    // System Prompt Editor
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("系统提示词")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("恢复默认") {
+                                store.current.systemPrompt = Configuration.default.systemPrompt
+                            }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundColor(.blue)
+                        }
+
+                        Text("双击触发键结束录音时，使用此提示词对识别结果进行润色。")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        TextEditor(text: $store.current.systemPrompt)
+                            .font(.system(size: 12))
+                            .frame(minHeight: 120, maxHeight: 200)
+                            .padding(4)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                            )
+                    }
                 }
                 .padding(.horizontal, 4)
 
@@ -566,6 +567,18 @@ struct SettingsView: View {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.secondary.opacity(0.08), lineWidth: 1)
                     )
+                }
+                .padding(.horizontal, 4)
+
+                // MARK: Diagnostics
+                HStack {
+                    Button(action: { AppLogger.openLogInFinder() }) {
+                        Label("查看诊断日志", systemImage: "doc.text.magnifyingglass")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.blue)
+                    Spacer()
                 }
                 .padding(.horizontal, 4)
 

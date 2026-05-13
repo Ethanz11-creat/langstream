@@ -17,7 +17,8 @@ let package = Package(
                 .copy("Resources/filler_words.json"),
                 .copy("Resources/AppIcon.icns"),
                 .copy("Resources/status_bar_icon.png"),
-                .copy("Resources/status_bar_icon@2x.png")
+                .copy("Resources/status_bar_icon@2x.png"),
+                .copy("Resources/services/whisper_server")
             ],
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"]) // 允许使用 @main

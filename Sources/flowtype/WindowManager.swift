@@ -6,6 +6,7 @@ import CoreGraphics
 @preconcurrency import CoreFoundation
 
 // MARK: - Option Tap Detector
+
 /// Standalone tap detector that lives outside @MainActor isolation.
 /// All access is serialized on the main thread (CGEventTap dispatches via
 /// DispatchQueue.main.async, Timer fires on the runloop that created it).
@@ -14,7 +15,7 @@ final class OptionTapDetector: @unchecked Sendable {
 
     private let tapWindow: TimeInterval = 0.35
     private var tapTimes: [Date] = []
-    private var tapTimer: Timer?
+    private var tapTimer = CancellableTimer()
 
     var onDoubleTap: (@Sendable () -> Void)?
     var onSingleTap: (@Sendable () -> Void)?
@@ -26,24 +27,22 @@ final class OptionTapDetector: @unchecked Sendable {
         tapTimes.removeAll { now.timeIntervalSince($0) > tapWindow }
 
         if tapTimes.count >= 2 {
-            tapTimer?.invalidate()
-            tapTimer = nil
+            tapTimer.cancel()
             tapTimes.removeAll()
-            print("[TapDetector] DOUBLE-TAP detected")
+            AppLogger.log("[TapDetector] DOUBLE-TAP detected")
             onDoubleTap?()
         } else {
-            tapTimer?.invalidate()
-            tapTimer = Timer.scheduledTimer(timeInterval: tapWindow,
-                                            target: self,
-                                            selector: #selector(timerFired),
-                                            userInfo: nil,
-                                            repeats: false)
-            print("[TapDetector] Single tap, timer started (window: \(tapWindow)s)")
+            tapTimer.schedule(
+                timeInterval: tapWindow,
+                target: self,
+                selector: #selector(timerFired)
+            )
+            AppLogger.log("[TapDetector] Single tap, timer started (window: \(tapWindow)s)")
         }
     }
 
     @objc private func timerFired() {
-        print("[TapDetector] Timer fired, tapTimes.count=\(tapTimes.count)")
+        AppLogger.log("[TapDetector] Timer fired, tapTimes.count=\(tapTimes.count)")
         if tapTimes.count == 1 {
             tapTimes.removeAll()
             onSingleTap?()
@@ -53,34 +52,31 @@ final class OptionTapDetector: @unchecked Sendable {
     }
 }
 
-// MARK: - Log Formatter
-
-private nonisolated(unsafe) let logDateFormatter: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
-    return f
-}()
-
-// MARK: - WindowManager
+// MARK: - Window Manager
 
 @MainActor
 class WindowManager: ObservableObject {
     static let shared = WindowManager()
     var panel: FloatingPanel?
-    private let orchestrator = PipelineOrchestrator.shared
 
     private var eventTapPort: CFMachPort?
+    /// Local monitor for key events (Esc cancellation) while the panel is visible.
+    private var keyMonitor: Any?
+
+    /// Periodic timer to ensure the CGEvent tap stays enabled after system events.
+    private var eventTapHealthTimer = CancellableTimer()
+    private let eventTapHealthInterval: TimeInterval = 5.0
 
     /// Current trigger key from configuration
     private var triggerKey: TriggerKey { ConfigurationStore.shared.current.triggerKey }
 
     /// Cached trigger key for safe access from C callback (avoids actor isolation issues)
-    private nonisolated(unsafe) static var cachedTriggerKey: TriggerKey = .command
+    private static var cachedTriggerKey = UnsafeCell<TriggerKey>(.command)
 
     init() {
         let view = AnyView(
             CapsuleView()
-                .environmentObject(orchestrator.state)
+                .environmentObject(SessionController.shared)
         )
         panel = FloatingPanel(view: view)
 
@@ -103,22 +99,23 @@ class WindowManager: ObservableObject {
     // MARK: - Hotkey Setup
 
     func setupGlobalHotkey() {
-        Self.fileLog("[WindowManager] setupGlobalHotkey called")
+        AppLogger.log("[WindowManager] setupGlobalHotkey called")
         let accessibilityEnabled = PermissionHelper.checkAccessibility()
         if !accessibilityEnabled {
-            Self.fileLog("[WindowManager] WARNING: Accessibility permission not granted")
+            AppLogger.log("[WindowManager] WARNING: Accessibility permission not granted")
         }
 
-        Self.cachedTriggerKey = triggerKey
-        Self.fileLog("[WindowManager] Cached triggerKey: \(triggerKey.displayName)")
+        Self.cachedTriggerKey.value = triggerKey
+        AppLogger.log("[WindowManager] Cached triggerKey: \(triggerKey.displayName)")
 
         setupCGEventTap()
-        Self.fileLog("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
+        AppLogger.log("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
     }
 
     func reloadHotkey() {
-        Self.fileLog("[WindowManager] Reloading hotkey configuration...")
-        Self.cachedTriggerKey = triggerKey
+        AppLogger.log("[WindowManager] Reloading hotkey configuration...")
+        Self.cachedTriggerKey.value = triggerKey
+        eventTapHealthTimer.cancel()
         if let tap = eventTapPort {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
@@ -128,11 +125,31 @@ class WindowManager: ObservableObject {
             eventTapPort = nil
         }
         setupCGEventTap()
-        Self.fileLog("[WindowManager] Hotkey reloaded with trigger key: \(triggerKey.displayName)")
+        AppLogger.log("[WindowManager] Hotkey reloaded with trigger key: \(triggerKey.displayName)")
+    }
+
+    private func startEventTapHealthCheck() {
+        eventTapHealthTimer.schedule(
+            withTimeInterval: eventTapHealthInterval,
+            repeats: true
+        ) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let tap = self.eventTapPort {
+                    if !CGEvent.tapIsEnabled(tap: tap) {
+                        AppLogger.log("[WindowManager] Event tap was disabled by system, re-enabling...")
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                } else {
+                    AppLogger.log("[WindowManager] Event tap health check: tap is nil, re-creating...")
+                    self.setupCGEventTap()
+                }
+            }
+        }
     }
 
     private func setupCGEventTap() {
-        Self.fileLog("[WindowManager] setupCGEventTap called")
+        AppLogger.log("[WindowManager] setupCGEventTap called")
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
 
         guard let tap = CGEvent.tapCreate(
@@ -143,7 +160,7 @@ class WindowManager: ObservableObject {
             callback: Self.eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            Self.fileLog("[WindowManager] FAILED to create CGEvent tap")
+            AppLogger.log("[WindowManager] FAILED to create CGEvent tap")
             return
         }
 
@@ -154,35 +171,8 @@ class WindowManager: ObservableObject {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         }
         CGEvent.tapEnable(tap: tap, enable: true)
-        Self.fileLog("[EventTap] CGEvent tap created and enabled successfully")
-    }
-
-    /// Reliable file-based logger that works inside .app bundles where stdout is lost.
-    /// Logs are written to ~/Library/Logs/flowtype/diagnostic.log for consistency.
-    nonisolated static func fileLog(_ message: String) {
-        let logDir = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Logs/flowtype")
-        let path = (logDir as NSString).appendingPathComponent("diagnostic.log")
-        let line = "[\(logDateFormatter.string(from: Date()))] \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-
-        do {
-            try FileManager.default.createDirectory(
-                atPath: logDir,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-            if FileManager.default.fileExists(atPath: path) {
-                let fh = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-                fh.seekToEndOfFile()
-                fh.write(data)
-                fh.closeFile()
-            } else {
-                FileManager.default.createFile(atPath: path, contents: data, attributes: nil)
-            }
-        } catch {
-            // Silent fail — logging should never crash the app
-        }
+        startEventTapHealthCheck()
+        AppLogger.log("[EventTap] CGEvent tap created and enabled successfully")
     }
 
     /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
@@ -193,11 +183,11 @@ class WindowManager: ObservableObject {
         }
 
         let flags = event.flags
-        let triggerFlag = cachedTriggerKey.cgEventFlag
+        let triggerFlag = cachedTriggerKey.value.cgEventFlag
         let isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
 
         if isTriggerKeyNow {
-            fileLog("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.displayName))")
+            AppLogger.log("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.value.displayName))")
             OptionTapDetector.shared.recordTap()
         }
 
@@ -208,32 +198,71 @@ class WindowManager: ObservableObject {
 
     @MainActor
     private func handleDoubleTap() {
-        let wasRecording = orchestrator.isRecording
-        print("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording)")
+        let controller = SessionController.shared
+        let wasRecording = controller.isRecording
+        AppLogger.log("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording)")
 
         if wasRecording {
-            print("[WindowManager] → DOUBLE-TAP END (LLM polish)")
-            orchestrator.beginEndModeDetection()
-            orchestrator.confirmDoubleTapEnd()
-            orchestrator.toggleRecording()
+            AppLogger.log("[WindowManager] → DOUBLE-TAP END (with LLM polish)")
+            controller.endRecording(withPolish: true)
         } else {
-            print("[WindowManager] → DOUBLE-TAP START recording")
-            orchestrator.toggleRecording()
+            AppLogger.log("[WindowManager] → DOUBLE-TAP START recording")
+            controller.startRecording()
         }
     }
 
     @MainActor
     private func handleSingleTap() {
-        print("[WindowManager] handleSingleTap — isRecording=\(orchestrator.isRecording)")
-        if orchestrator.isRecording {
-            print("[WindowManager] → SINGLE-TAP END (raw ASR)")
-            orchestrator.toggleRecording()
+        let controller = SessionController.shared
+        AppLogger.log("[WindowManager] handleSingleTap — isRecording=\(controller.isRecording)")
+
+        if controller.isRecording {
+            AppLogger.log("[WindowManager] → SINGLE-TAP END (raw ASR)")
+            controller.endRecording(withPolish: false)
         } else {
-            print("[WindowManager] Single tap while idle, ignoring")
+            AppLogger.log("[WindowManager] Single tap while idle, ignoring")
         }
     }
 
+    @MainActor
+    private func handleEscapeKey() {
+        AppLogger.log("[WindowManager] Escape pressed — cancelling")
+        SessionController.shared.cancel()
+    }
+
     // MARK: - Window Management
+
+    /// Show the floating panel as a visual indicator only.
+    /// The panel is non-activating and cannot become key,
+    /// so it never steals focus from the user's active input field.
+    func showWindow() {
+        guard let panel = panel else { return }
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.midX - 160
+            let y = screen.visibleFrame.minY + 40
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        // Use orderFront instead of makeKeyAndOrderFront because
+        // the panel cannot become key (canBecomeKey == false).
+        panel.orderFront(nil)
+
+        // Install Esc key monitor for cancellation while the panel is visible.
+        if keyMonitor == nil {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self = self, event.keyCode == 53 else { return event }
+                self.handleEscapeKey()
+                return nil // consume the event
+            }
+        }
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
 
     func toggleWindow() {
         guard let panel = panel else { return }
@@ -244,20 +273,6 @@ class WindowManager: ObservableObject {
         }
     }
 
-    func showWindow() {
-        guard let panel = panel else { return }
-        if let screen = NSScreen.main {
-            let x = screen.visibleFrame.midX - 160
-            let y = screen.visibleFrame.minY + 40
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        }
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    func hide() {
-        panel?.orderOut(nil)
-    }
-
     func hideMainWindow() {
         for window in NSApp.windows {
             if window.title.isEmpty && !(window is FloatingPanel) {
@@ -265,5 +280,4 @@ class WindowManager: ObservableObject {
             }
         }
     }
-
 }

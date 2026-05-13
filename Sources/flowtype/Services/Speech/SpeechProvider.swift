@@ -1,6 +1,6 @@
 import Foundation
 
-protocol SpeechProvider {
+protocol SpeechProvider: Sendable {
     var name: String { get }
     func transcribe(audioData: Data, timeout: TimeInterval) async throws -> String
 }

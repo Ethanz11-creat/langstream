@@ -1,350 +1,604 @@
 import Foundation
 import AppKit
+import SwiftUI
+
+// MARK: - Session State
+
+enum SessionState: Equatable {
+    case idle
+    case recording(elapsedSeconds: Int)
+    case processing(provider: String)
+    case polishing(preview: String)
+    case injecting
+    case error(String)
+}
+
+// MARK: - Session Controller
 
 @MainActor
-final class PipelineOrchestrator {
-    static let shared: PipelineOrchestrator = {
-        let instance = PipelineOrchestrator()
-        return instance
-    }()
+final class SessionController: ObservableObject {
+    static let shared = SessionController()
 
-    private let appState = AppState()
     private let audioRecorder = AudioRecorder()
     private let speechRouter = SpeechRouter()
-    private let llmService = LLMService(configuration: Configuration.shared)
-    private lazy var asyncRefiner = AsyncRefiner(speechRouter: speechRouter, llmService: llmService)
+    private let llmService = LLMService()
     private let appleSpeechProvider = AppleSpeechProvider()
 
+    // MARK: - Published State
+
+    @Published private(set) var sessionState: SessionState = .idle
+    @Published private(set) var amplitude: Float = 0.0
+    @Published private(set) var previewText: String = ""
+
+    // MARK: - Session Identity
+
+    private var sessionID: UInt64 = 0
+    private var activeSessionID: UInt64 = 0
+    private var useLLMPolish: Bool = false
+
+    // MARK: - Tasks
+
     private var recordingTask: Task<Void, Never>?
+    private var processingTask: Task<Void, Never>?
+    private var streamingTask: Task<Void, Never>?
+    private var previewStreamTask: Task<Void, Never>?
 
-    /// End-mode detection: single-tap end (raw ASR) vs double-tap end (LLM polish)
-    var pendingEndModeDetection = false
-    var useLLMForCurrentSession = false
-    private var endModeTimer: Timer?
+    // MARK: - Audio Slicing
 
-    // MARK: - Segmented ASR state
-    /// Completed segment ASR results, keyed by insertion order.
-    private var segmentResults: [Int: String] = [:]
-    /// Background ASR tasks for each emitted segment.
-    private var segmentTasks: [Task<Void, Never>] = []
-    /// Monotonic index for the next segment.
-    private var nextSegmentIndex = 0
+    private var collectedSlices: [AudioSlice] = []
+    private var streamingResults: [Int: String] = [:]
 
-    /// Derived from appState — single source of truth.
-    var isRecording: Bool { appState.state.isRecordingIndicator }
+    // MARK: - Recording Timer
 
-    var state: AppState { appState }
+    private var recordingTimer = CancellableTimer()
+    private var elapsedSeconds: Int = 0
 
-    // MARK: - End-Mode Detection
+    // MARK: - Preview Debounce
 
-    func beginEndModeDetection() {
-        pendingEndModeDetection = true
-        useLLMForCurrentSession = false
-        endModeTimer?.invalidate()
-        endModeTimer = Timer.scheduledTimer(timeInterval: 0.35, target: self, selector: #selector(endModeTimerFired), userInfo: nil, repeats: false)
+    private var previewDebounceTask: Task<Void, Never>?
+    private var pendingPreviewText: String = ""
+
+    // MARK: - Injection Guard
+
+    private var hasInjected: Bool = false
+
+    // MARK: - Error Dismiss
+
+    private var errorDismissTask: Task<Void, Never>?
+
+    // MARK: - Diagnostics
+
+    private var recordingStartTime: Date?
+
+    // MARK: - Computed
+
+    var isRecording: Bool {
+        if case .recording = sessionState { return true }
+        return false
     }
 
-    @objc private func endModeTimerFired() {
-        if pendingEndModeDetection {
-            pendingEndModeDetection = false
-            useLLMForCurrentSession = false
-            print("[PipelineOrchestrator] End-mode timer expired → single-tap end (raw ASR)")
-        }
+    var isProcessing: Bool {
+        if case .processing = sessionState { return true }
+        return false
     }
 
-    func confirmDoubleTapEnd() {
-        endModeTimer?.invalidate()
-        endModeTimer = nil
-        pendingEndModeDetection = false
-        useLLMForCurrentSession = true
-        print("[PipelineOrchestrator] Double-tap end confirmed → LLM polish enabled")
-    }
+    // MARK: - Public API
 
-    func toggleRecording() {
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
+    func startRecording() {
+        let newID = nextSessionID()
+        AppLogger.log("[SessionController#\(newID)] startRecording requested")
 
-    private func startRecording() {
-        print("[PipelineOrchestrator] startRecording called")
-        appState.clearTranscription()
-        segmentResults.removeAll()
-        segmentTasks.removeAll()
-        nextSegmentIndex = 0
-
-        // Show window immediately with correct state so UI never shows stale .idle
-        appState.transition(to: .recording(elapsedSeconds: 0))
-        WindowManager.shared.showWindow()
-
-        recordingTask = Task { [weak self] in
-            guard let self = self else { return }
-
-            do {
-                // 1. Check microphone permission (fast path if already granted)
-                print("[PipelineOrchestrator] Requesting mic permission...")
-                WindowManager.fileLog("Pipeline: requesting mic permission...")
-                let granted = await self.audioRecorder.requestPermission()
-                guard granted else {
-                    print("[PipelineOrchestrator] Mic permission denied")
-                    WindowManager.fileLog("Pipeline: mic permission DENIED")
-                    // Provide actionable guidance for ad-hoc signed builds where the
-                    // system may silently deny without showing a dialog.
-                    let status = self.audioRecorder.authorizationStatus()
-                    if status == 0 {
-                        self.appState.showError("麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。")
-                    } else if status == 1 {
-                        self.appState.showError("麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。")
-                    } else {
-                        self.appState.showError("请在系统设置中允许麦克风访问")
-                    }
-                    return
-                }
-                print("[PipelineOrchestrator] Mic permission granted")
-                WindowManager.fileLog("Pipeline: mic permission granted")
-                try Task.checkCancellation()
-
-                // 2. Start AudioRecorder
-                print("[PipelineOrchestrator] Starting AudioRecorder...")
-                let output = try await self.audioRecorder.startRecording()
-                print("[PipelineOrchestrator] AudioRecorder started")
-
-                // 2.5 Set up real-time AppleSpeech preview (on-device, offline)
-                WindowManager.fileLog("[PipelineOrchestrator] Setting up AppleSpeech real-time preview...")
-                self.audioRecorder.onAudioBuffer = { [weak self] buffer in
-                    self?.appleSpeechProvider.appendAudioBuffer(buffer)
-                }
-                let previewStream = await self.appleSpeechProvider.startStreamingRecognition()
-                WindowManager.fileLog("[PipelineOrchestrator] AppleSpeech preview stream created")
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    var previewCount = 0
-                    for await text in previewStream {
-                        previewCount += 1
-                        if previewCount <= 3 || previewCount % 10 == 0 {
-                            WindowManager.fileLog("[PipelineOrchestrator] Preview update #\(previewCount): '\(text.prefix(40))'")
-                        }
-                        self.appState.updatePreviewText(text)
-                    }
-                    WindowManager.fileLog("[PipelineOrchestrator] Preview stream ended, total updates=\(previewCount)")
-                }
-
-                // 3. Consume segment stream in background — each 60s chunk gets ASR’d immediately
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    for await segmentData in output.segments {
-                        let index = self.nextSegmentIndex
-                        self.nextSegmentIndex += 1
-                        print("[PipelineOrchestrator] Received segment #\(index) (\(segmentData.count) bytes), starting ASR...")
-                        let task = Task { @MainActor [weak self] in
-                            guard let self = self else { return }
-                            if let result = await self.asyncRefiner.transcribeWithScoring(audioData: segmentData) {
-                                self.segmentResults[index] = result.text
-                                print("[PipelineOrchestrator] Segment #\(index) ASR done: '\(result.text)'")
-                            } else {
-                                print("[PipelineOrchestrator] Segment #\(index) ASR failed")
-                            }
-                        }
-                        self.segmentTasks.append(task)
-                    }
-                }
-
-                // 4. Consume amplitude stream (blocks until stream finishes or task cancelled)
-                print("[PipelineOrchestrator] Waiting for audio stream...")
-                for await amplitude in output.amplitude {
-                    try Task.checkCancellation()
-                    self.appState.updateAmplitude(amplitude)
-                }
-                print("[PipelineOrchestrator] Audio stream ended")
-
-            } catch is CancellationError {
-                print("[PipelineOrchestrator] Recording task cancelled")
-            } catch {
-                print("[PipelineOrchestrator] Recording failed: \(error)")
-                self.appState.showError("录音启动失败: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private func stopRecording() {
-        print("[PipelineOrchestrator] stopRecording called, currentState=\(appState.state)")
-
-        // Defensive: if somehow we're not actually recording, just bail
-        guard isRecording else {
-            print("[PipelineOrchestrator] stopRecording: not in recording state, bailing")
+        switch sessionState {
+        case .idle, .error:
+            break
+        default:
+            AppLogger.log("[SessionController#\(newID)] REJECTED: state=\(sessionState)")
             return
         }
 
-        // 1. Stop AudioRecorder — returns completed 60s segments + final partial buffer
-        print("[PipelineOrchestrator] Stopping AudioRecorder...")
-        let (_, finalData) = self.audioRecorder.stopRecording()
-        self.audioRecorder.onAudioBuffer = nil
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
 
-        // Stop AppleSpeech streaming and capture final local result
-        let localPreviewText = self.appleSpeechProvider.stopStreamingRecognition()
+        activeSessionID = newID
+        useLLMPolish = false
+        hasInjected = false
+        collectedSlices.removeAll()
+        streamingResults.removeAll()
+        streamingTask = nil
+        recordingStartTime = Date()
+
+        previewText = ""
+        amplitude = 0.0
+        pendingPreviewText = ""
+        previewDebounceTask?.cancel()
+        previewDebounceTask = nil
+
+        sessionState = .recording(elapsedSeconds: 0)
+        startRecordingTimer()
+        WindowManager.shared.showWindow()
+
+        recordingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runRecordingSession(id: newID)
+        }
+    }
+
+    func endRecording(withPolish: Bool) {
+        AppLogger.log("[SessionController#\(activeSessionID)] endRecording called, withPolish=\(withPolish)")
+
+        guard isRecording else {
+            AppLogger.log("[SessionController#\(activeSessionID)] endRecording: not recording, ignoring")
+            return
+        }
+
+        useLLMPolish = withPolish
+        stopRecordingTimer()
 
         recordingTask?.cancel()
         recordingTask = nil
 
-        // All remaining work is async: ASR, polish, injection.
-        Task { [weak self] in
-            guard let self = self else {
-                print("[PipelineOrchestrator] Self deallocated during post-processing")
+        sessionState = .processing(provider: WhisperServerManager.shared.isServerReady ? "本地识别" : "本地识别(兜底)")
+
+        processingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runProcessingSession(id: self.activeSessionID)
+        }
+    }
+
+    func cancel() {
+        AppLogger.log("[SessionController#\(activeSessionID)] cancel called, state=\(sessionState)")
+
+        recordingTask?.cancel()
+        recordingTask = nil
+        processingTask?.cancel()
+        processingTask = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+        previewStreamTask?.cancel()
+        previewStreamTask = nil
+
+        audioRecorder.onAudioBuffer = nil
+        audioRecorder.onRecordingFrozen = nil
+        _ = audioRecorder.stopRecording()
+        _ = appleSpeechProvider.stopStreamingRecognition()
+
+        resetToIdle()
+        AppLogger.log("[SessionController] Cancelled — session reset to idle")
+    }
+
+    // MARK: - Recording Phase
+
+    private func runRecordingSession(id: UInt64) async {
+        AppLogger.log("[SessionController#\(id)] Recording phase started")
+        let recordingStart = Date()
+
+        defer {
+            let elapsed = Date().timeIntervalSince(recordingStart)
+            AppLogger.log("[SessionController#\(id)] Recording phase ended (duration: \(String(format: "%.1f", elapsed))s)")
+        }
+
+        do {
+            let granted = await audioRecorder.requestPermission()
+            guard granted else {
+                let status = audioRecorder.authorizationStatus()
+                let msg = micPermissionMessage(status: status)
+                showError(msg)
+                AppLogger.log("[SessionController#\(id)] Mic permission denied (status=\(status))")
                 return
             }
+            try checkCancellation(id: id)
 
-            // 2. Wait for all in-flight segment ASR tasks to complete
-            print("[PipelineOrchestrator] Waiting for \(self.segmentTasks.count) segment ASR tasks...")
-            for task in self.segmentTasks {
-                await task.value
+            let output = try await audioRecorder.startRecording()
+            AppLogger.log("[SessionController#\(id)] AudioRecorder started")
+
+            audioRecorder.onAudioBuffer = { [weak self] buffer in
+                self?.appleSpeechProvider.appendAudioBuffer(buffer)
             }
-            print("[PipelineOrchestrator] All segment ASR tasks completed")
+            let previewStream = await appleSpeechProvider.startStreamingRecognition()
+            AppLogger.log("[SessionController#\(id)] AppleSpeech preview started")
 
-            // 3. Build ordered text from completed segments
-            let orderedSegmentTexts = (0..<self.nextSegmentIndex).compactMap { self.segmentResults[$0] }
-            let combinedSegmentText = SegmentMerger.merge(orderedSegmentTexts)
-            if !orderedSegmentTexts.isEmpty {
-                print("[PipelineOrchestrator] Combined \(orderedSegmentTexts.count) segments (deduplicated)")
-            }
-
-            // 4. ASR the final partial buffer
-            var finalASRText = ""
-            if let finalData = finalData, !finalData.isEmpty {
-                let wavHeaderSize = 44
-                let audioPayloadSize = finalData.count - wavHeaderSize
-                let estimatedDuration = Double(audioPayloadSize) / 32000.0
-                print("[PipelineOrchestrator] Final audio: \(finalData.count) bytes, ~\(String(format: "%.1f", estimatedDuration))s")
-
-                let providerName = WhisperServerManager.shared.isServerReady ? "本地识别" : "本地识别(兜底)"
-                self.appState.transition(to: .processingASR(provider: providerName))
-                if let result = await self.asyncRefiner.transcribeWithScoring(audioData: finalData) {
-                    finalASRText = result.text
-                    print("[PipelineOrchestrator] Final segment ASR: '\(finalASRText)'")
-                } else {
-                    print("[PipelineOrchestrator] Final segment ASR failed")
+            self.previewStreamTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                for await text in previewStream {
+                    guard self.activeSessionID == id else { break }
+                    self.updatePreviewText(text)
                 }
-            } else {
-                print("[PipelineOrchestrator] No final audio data")
             }
 
-            // 5. Combine all ASR results
-            var fullASRText = [combinedSegmentText, finalASRText]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
-
-            // Fallback to AppleSpeech local result if cloud ASR produced nothing
-            if fullASRText.isEmpty, !localPreviewText.isEmpty {
-                print("[PipelineOrchestrator] Cloud ASR empty, using AppleSpeech local preview")
-                fullASRText = localPreviewText
+            self.streamingTask = Task { [weak self] in
+                guard let self else { return }
+                await self.runStreamingTranscription(id: id, sliceStream: output.slices)
             }
 
-            guard !fullASRText.isEmpty else {
-                print("[PipelineOrchestrator] Combined ASR text is empty")
-                self.appState.showError("语音识别结果为空")
-                WindowManager.shared.hide()
-                self.appState.transition(to: .idle)
-                // Clean up state
-                self.segmentResults.removeAll()
-                self.segmentTasks.removeAll()
-                self.nextSegmentIndex = 0
-                return
-            }
-
-            // 6. Post-process combined ASR text
-            let processedText = ASRPostProcessor.process(fullASRText)
-            let didChange = processedText != fullASRText
-            if didChange {
-                print("[PipelineOrchestrator] Post-processed: '\(fullASRText)' -> '\(processedText)'")
-            }
-
-            let finalText: String
-            if processedText.isEmpty {
-                print("[PipelineOrchestrator] Post-processed text is empty, falling back to raw ASR text")
-                finalText = fullASRText.trimmingCharacters(in: .whitespaces)
-            } else {
-                finalText = processedText
-            }
-
-            // 7. Display recognized text in capsule (local rendering)
-            self.appState.recognizedText = finalText
-            self.appState.previewText = finalText
-            print("[PipelineOrchestrator] Recognized combined text: '\(finalText)'")
-
-            // 8. Wait for end-mode detection to complete (if still pending)
-            if self.pendingEndModeDetection {
-                print("[PipelineOrchestrator] Waiting for end-mode detection...")
-                let startTime = Date()
-                while self.pendingEndModeDetection && Date().timeIntervalSince(startTime) < 0.4 {
-                    try? await Task.sleep(nanoseconds: 50_000_000)
+            AppLogger.log("[SessionController#\(id)] Waiting for audio stream...")
+            for await amp in output.amplitude {
+                try checkCancellation(id: id)
+                if abs(self.amplitude - amp) > 0.005 {
+                    self.amplitude = amp
                 }
-                print("[PipelineOrchestrator] End-mode detection complete, useLLM=\(self.useLLMForCurrentSession)")
             }
+            AppLogger.log("[SessionController#\(id)] Audio amplitude stream ended")
 
-            // 9. Determine text to inject based on end mode
-            let textToInject: String
-            print("[PipelineOrchestrator] useLLMForCurrentSession=\(self.useLLMForCurrentSession)")
-            if self.useLLMForCurrentSession {
-                // Double-tap end: LLM polish path (polish the *combined* text)
-                self.appState.transition(to: .polishing(preview: ""))
-                print("[PipelineOrchestrator] *** DOUBLE-TAP END: starting LLM polish ***")
-                do {
-                    let stream = await self.llmService.polishText(finalText)
-                    var polished = ""
-                    for try await chunk in stream {
-                        polished += chunk
-                        self.appState.updatePolishingPreview(polished)
-                    }
-                    if !polished.isEmpty && polished != finalText {
-                        textToInject = polished
-                        self.appState.recognizedText = polished
-                        self.appState.previewText = polished
-                        print("[PipelineOrchestrator] *** LLM polished: '\(polished)' ***")
+        } catch is CancellationError {
+            AppLogger.log("[SessionController#\(id)] Recording cancelled")
+        } catch {
+            AppLogger.log("[SessionController#\(id)] Recording failed: \(error)")
+            showError("录音启动失败: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Streaming Transcription Phase
+
+    private func runStreamingTranscription(id: UInt64, sliceStream: AsyncStream<AudioSlice>) async {
+        AppLogger.log("[SessionController#\(id)] Streaming transcription started")
+        let startTime = Date()
+        defer {
+            let elapsed = Date().timeIntervalSince(startTime)
+            AppLogger.log("[SessionController#\(id)] Streaming transcription ended in \(String(format: "%.1f", elapsed))s")
+        }
+
+        let provider = speechRouter.primaryProvider
+        let maxWorkers = 2
+
+        await withTaskGroup(of: (index: Int, text: String?).self) { group in
+            var iterator = sliceStream.makeAsyncIterator()
+            var activeCount = 0
+            var streamEnded = false
+
+            repeat {
+                while activeCount < maxWorkers && !streamEnded {
+                    if let slice = await iterator.next() {
+                        guard self.activeSessionID == id else { break }
+
+                        self.collectedSlices.append(slice)
+
+                        group.addTask { [provider] in
+                            do {
+                                let text = try await provider.transcribe(audioData: slice.audioData, timeout: 300)
+                                return (slice.index, text)
+                            } catch {
+                                AppLogger.log("[SessionController#\(id)] Slice #\(slice.index) failed: \(error)")
+                                return (slice.index, nil)
+                            }
+                        }
+                        activeCount += 1
                     } else {
-                        print("[PipelineOrchestrator] LLM polish returned empty/same, using raw text")
-                        textToInject = finalText
+                        streamEnded = true
+                        break
                     }
-                } catch {
-                    print("[PipelineOrchestrator] LLM polish failed: \(error)")
-                    textToInject = finalText
                 }
-            } else {
-                // Single-tap end: raw ASR text (concatenated from all segments)
-                textToInject = finalText
-                print("[PipelineOrchestrator] *** SINGLE-TAP END: injecting raw ASR text ***")
+
+                if activeCount > 0 {
+                    if let completed = await group.next() {
+                        activeCount -= 1
+                        if let text = completed.text {
+                            self.streamingResults[completed.index] = text
+                        }
+                    }
+                }
+            } while activeCount > 0 || !streamEnded
+        }
+    }
+
+    // MARK: - Processing Phase
+
+    private func runProcessingSession(id: UInt64) async {
+        AppLogger.log("[SessionController#\(id)] Processing phase started")
+        let processingStartTime = Date()
+
+        defer {
+            let totalProcessingTime = Date().timeIntervalSince(processingStartTime)
+            if let recStart = recordingStartTime {
+                let totalSessionTime = Date().timeIntervalSince(recStart)
+                AppLogger.log("[SessionController#\(id)] ===== TIMING SUMMARY =====")
+                AppLogger.log("[SessionController#\(id)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
+                AppLogger.log("[SessionController#\(id)] Processing time: \(String(format: "%.1f", totalProcessingTime))s")
             }
+            AppLogger.log("[SessionController#\(id)] Processing phase ended (total: \(String(format: "%.1f", totalProcessingTime))s)")
+        }
 
-            // Reset end-mode flags
-            self.pendingEndModeDetection = false
-            self.useLLMForCurrentSession = false
+        let stopAudioStart = Date()
+        _ = audioRecorder.stopRecording()
+        audioRecorder.onAudioBuffer = nil
+        audioRecorder.onRecordingFrozen = nil
+        AppLogger.log("[SessionController#\(id)] AudioRecorder stopped in \(String(format: "%.2f", Date().timeIntervalSince(stopAudioStart)))s")
 
-            // Clean up segment state
-            self.segmentResults.removeAll()
-            self.segmentTasks.removeAll()
-            self.nextSegmentIndex = 0
+        let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
+        AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: '\(localPreviewText.prefix(80))'")
 
-            // 10. Hide window before injection so focus returns to previous app
-            WindowManager.shared.hide()
-            // Give OS time to switch focus back to the target app
-            try? await Task.sleep(nanoseconds: 80_000_000)
+        let waitStreamStart = Date()
+        let streamCompleted = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await self.streamingTask?.value; return true }
+            group.addTask { try? await Task.sleep(nanoseconds: 30_000_000_000); return false }
+            let first = await group.next()!
+            group.cancelAll()
+            return first
+        }
+        if !streamCompleted {
+            AppLogger.log("[SessionController#\(id)] Streaming transcription timed out after 30s")
+            streamingTask?.cancel()
+        }
+        streamingTask = nil
+        AppLogger.log("[SessionController#\(id)] Waited for streaming in \(String(format: "%.2f", Date().timeIntervalSince(waitStreamStart)))s, results: \(streamingResults.count)/\(collectedSlices.count) slices")
 
-            // 11. Inject final text
-            self.appState.transition(to: .injecting)
-            print("[PipelineOrchestrator] Injecting '\(textToInject)'...")
+        let mergeStart = Date()
+        let maxIndex = collectedSlices.map(\.index).max() ?? 0
+        var allTexts = orderedTexts(from: streamingResults, maxIndex: maxIndex)
+
+        var finalASRText = allTexts.joined(separator: " ")
+        AppLogger.log("[SessionController#\(id)] Merged ASR text (streaming): '\(finalASRText.prefix(80))' (merge took \(String(format: "%.2f", Date().timeIntervalSince(mergeStart)))s)")
+
+        if finalASRText.isEmpty, !collectedSlices.isEmpty {
+            AppLogger.log("[SessionController#\(id)] Streaming produced nothing, falling back to batch transcription")
+            let fallbackStart = Date()
+            let transcriber = ParallelTranscriber(provider: speechRouter.primaryProvider, maxWorkers: 2)
+            let results = await transcriber.transcribe(slices: collectedSlices, timeout: 300)
+            allTexts += orderedTexts(from: results, maxIndex: maxIndex)
+            finalASRText = allTexts.joined(separator: " ")
+            AppLogger.log("[SessionController#\(id)] Fallback ASR result: '\(finalASRText.prefix(80))' (took \(String(format: "%.1f", Date().timeIntervalSince(fallbackStart)))s)")
+        }
+
+        if finalASRText.isEmpty, !localPreviewText.isEmpty {
+            AppLogger.log("[SessionController#\(id)] Using AppleSpeech preview as fallback")
+            finalASRText = localPreviewText
+        }
+
+        let postProcessStart = Date()
+        let processedText = ASRPostProcessor.process(finalASRText)
+        let textToUse = processedText.isEmpty ? finalASRText.trimmingCharacters(in: .whitespaces) : processedText
+        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: '\(textToUse.prefix(80))'")
+
+        guard !textToUse.isEmpty else {
+            AppLogger.log("[SessionController#\(id)] Empty text, aborting")
+            showError("语音识别结果为空")
+            return
+        }
+
+        if useLLMPolish {
+            let polishStart = Date()
+            sessionState = .polishing(preview: "")
+
+            var polishedText: String? = nil
             do {
-                try await KeyboardInjector.insertText(textToInject)
-                print("[PipelineOrchestrator] Text injected successfully")
+                let stream = await llmService.polishText(textToUse)
+                var accumulated = ""
+                for try await chunk in stream {
+                    guard activeSessionID == id else { throw CancellationError() }
+                    accumulated += chunk
+                    sessionState = .polishing(preview: accumulated)
+                }
+                if !accumulated.isEmpty && accumulated != textToUse {
+                    polishedText = accumulated
+                    AppLogger.log("[SessionController#\(id)] LLM polished in \(String(format: "%.1f", Date().timeIntervalSince(polishStart)))s: '\(accumulated.prefix(100))'")
+                } else {
+                    AppLogger.log("[SessionController#\(id)] LLM returned empty/same, using raw")
+                }
+            } catch is CancellationError {
+                AppLogger.log("[SessionController#\(id)] LLM polish cancelled")
+                resetToIdle()
+                return
             } catch {
-                print("[PipelineOrchestrator] Injection failed: \(error)")
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(textToInject, forType: .string)
-                self.appState.showError("已复制到剪贴板")
+                AppLogger.log("[SessionController#\(id)] LLM polish failed: \(error)")
             }
 
-            // Hide window after everything completes
-            WindowManager.shared.hide()
-            self.appState.transition(to: .idle)
+            let finalText = polishedText ?? textToUse
+            await injectText(finalText, sessionID: id)
+        } else {
+            AppLogger.log("[SessionController#\(id)] Using raw ASR text (single-tap end)")
+            await injectText(textToUse, sessionID: id)
+        }
+    }
+
+    // MARK: - Injection Phase
+
+    private func injectText(_ text: String, sessionID: UInt64) async {
+        guard !hasInjected else {
+            AppLogger.log("[SessionController#\(sessionID)] Duplicate injection blocked")
+            return
+        }
+        hasInjected = true
+        AppLogger.log("[SessionController#\(sessionID)] Injection phase started")
+        let injectStart = Date()
+
+        sessionState = .injecting
+        WindowManager.shared.hide()
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        guard activeSessionID == sessionID else {
+            AppLogger.log("[SessionController#\(sessionID)] Session changed before injection, aborting")
+            return
+        }
+
+        do {
+            try await KeyboardInjector.insertText(text)
+            AppLogger.log("[SessionController#\(sessionID)] Text injected successfully in \(String(format: "%.2f", Date().timeIntervalSince(injectStart)))s")
+        } catch {
+            AppLogger.log("[SessionController#\(sessionID)] Injection failed: \(error)")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            showError("已复制到剪贴板")
+            return
+        }
+
+        resetToIdle()
+        if let recStart = recordingStartTime {
+            let totalSessionTime = Date().timeIntervalSince(recStart)
+            AppLogger.log("[SessionController#\(sessionID)] ===== SESSION COMPLETE =====")
+            AppLogger.log("[SessionController#\(sessionID)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
+        }
+    }
+
+    // MARK: - Timer
+
+    private func startRecordingTimer() {
+        elapsedSeconds = 0
+        recordingTimer.schedule(withTimeInterval: 1.0, repeats: true) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording else { return }
+                self.elapsedSeconds += 1
+                self.sessionState = .recording(elapsedSeconds: self.elapsedSeconds)
+            }
+        }
+    }
+
+    private func stopRecordingTimer() {
+        recordingTimer.cancel()
+        elapsedSeconds = 0
+    }
+
+    // MARK: - Preview Debounce
+
+    private func updatePreviewText(_ text: String) {
+        if case .recording = sessionState, text.isEmpty, !previewText.isEmpty {
+            return
+        }
+        guard text != pendingPreviewText else { return }
+        pendingPreviewText = text
+
+        if previewText.isEmpty, !text.isEmpty {
+            previewText = text
+            return
+        }
+
+        previewDebounceTask?.cancel()
+        previewDebounceTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch { return }
+            guard let self else { return }
+            self.previewText = self.pendingPreviewText
+            self.previewDebounceTask = nil
+        }
+    }
+
+    // MARK: - Error
+
+    private func showError(_ message: String) {
+        let errorSessionID = activeSessionID
+        sessionState = .error(message)
+        WindowManager.shared.showWindow()
+        errorDismissTask?.cancel()
+        errorDismissTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+            } catch { return }
+            guard let self else { return }
+            if case .error = self.sessionState, self.activeSessionID == errorSessionID {
+                self.resetToIdle()
+            }
+        }
+    }
+
+    // MARK: - Reset
+
+    private func resetToIdle() {
+        sessionState = .idle
+        activeSessionID = 0
+        useLLMPolish = false
+        hasInjected = false
+        collectedSlices.removeAll()
+        streamingResults.removeAll()
+        recordingStartTime = nil
+        previewText = ""
+        amplitude = 0.0
+        pendingPreviewText = ""
+        previewDebounceTask?.cancel()
+        previewDebounceTask = nil
+        previewStreamTask?.cancel()
+        previewStreamTask = nil
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        stopRecordingTimer()
+        WindowManager.shared.hide()
+    }
+
+    // MARK: - Helpers
+
+    private func nextSessionID() -> UInt64 {
+        sessionID += 1
+        return sessionID
+    }
+
+    private func checkCancellation(id: UInt64) throws {
+        guard activeSessionID == id else {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private func micPermissionMessage(status: Int) -> String {
+        if status == 0 {
+            return "麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。"
+        } else if status == 1 {
+            return "麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。"
+        } else {
+            return "请在系统设置中允许麦克风访问"
+        }
+    }
+
+    private func orderedTexts(from dict: [Int: String], maxIndex: Int) -> [String] {
+        guard maxIndex >= 1 else { return [] }
+        return (1...maxIndex).compactMap { i in
+            guard let text = dict[i], !text.isEmpty else { return nil }
+            return text
+        }
+    }
+}
+
+// MARK: - SessionState UI Properties
+
+extension SessionState {
+
+    var iconName: String {
+        switch self {
+        case .idle:       return "mic"
+        case .recording:  return "waveform"
+        case .processing: return "brain.head.profile"
+        case .polishing:  return "sparkles"
+        case .injecting:  return "keyboard"
+        case .error:      return "exclamationmark.triangle"
+        }
+    }
+
+    var statusColor: Color {
+        switch self {
+        case .idle:       return Color.white.opacity(0.5)
+        case .recording:  return Color(red: 0.5, green: 0.3, blue: 1.0)
+        case .processing: return .blue
+        case .polishing:  return Color(red: 0.8, green: 0.4, blue: 0.9)
+        case .injecting:  return .green
+        case .error:      return .red
+        }
+    }
+
+    var statusTitle: String {
+        switch self {
+        case .idle:                      return "准备就绪"
+        case .recording:                 return "Listening..."
+        case .processing(let provider):  return "\(provider)..."
+        case .polishing:                 return "润色中..."
+        case .injecting:                 return "输入中..."
+        case .error:                     return "出错了"
+        }
+    }
+
+    var isRecordingIndicator: Bool {
+        if case .recording = self { return true }
+        return false
+    }
+
+    var showSpinner: Bool {
+        switch self {
+        case .processing, .polishing: return true
+        default: return false
+        }
+    }
+
+    var showPanel: Bool {
+        switch self {
+        case .idle: return false
+        default: return true
         }
     }
 }

@@ -2,20 +2,20 @@ import AppKit
 import SwiftUI
 
 @MainActor
-class SettingsWindowController: NSWindowController, NSWindowDelegate {
+class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
 
     convenience init() {
-        let settingsView = SettingsView()
-        let hostingView = NSHostingView(rootView: settingsView)
+        let view = OnboardingView()
+        let hostingView = NSHostingView(rootView: view)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "FlowType 设置"
+        window.title = "FlowType 设置向导"
         window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false

@@ -1,14 +1,20 @@
 import AppKit
 import SwiftUI
+import Combine
 
 @MainActor
-class StatusBarController {
+class StatusBarController: NSObject, NSMenuDelegate {
     static let shared = StatusBarController()
 
     private var statusItem: NSStatusItem?
     private var settingsWindowController: SettingsWindowController?
+    private var statusMenuItem: NSMenuItem?
+    private var cancellable: AnyCancellable?
+    private var sessionCancellable: AnyCancellable?
 
-    private init() {}
+    private override init() {
+        super.init()
+    }
 
     func setup() {
         let statusBar = NSStatusBar.system
@@ -31,10 +37,47 @@ class StatusBarController {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         buildMenu()
+
+        cancellable = WhisperServerManager.shared.$serverStage
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] stage in
+                guard let self else { return }
+                if case .idle = SessionController.shared.sessionState {
+                    self.statusItem?.button?.toolTip = "FlowType — \(stage.rawValue)"
+                }
+            }
+
+        sessionCancellable = SessionController.shared.$sessionState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .idle:
+                    let stage = WhisperServerManager.shared.serverStage
+                    self.statusItem?.button?.toolTip = "FlowType — \(stage.rawValue)"
+                case .recording:
+                    self.statusItem?.button?.toolTip = "FlowType — 录音中..."
+                case .processing:
+                    self.statusItem?.button?.toolTip = "FlowType — 识别中..."
+                case .polishing:
+                    self.statusItem?.button?.toolTip = "FlowType — 润色中..."
+                case .injecting:
+                    self.statusItem?.button?.toolTip = "FlowType — 输入中..."
+                case .error(let msg):
+                    self.statusItem?.button?.toolTip = "FlowType — 错误: \(msg)"
+                }
+            }
     }
 
     private func buildMenu() {
         let menu = NSMenu()
+        menu.delegate = self
+
+        let asrStatusItem = NSMenuItem(title: "ASR 状态: 检查中...", action: nil, keyEquivalent: "")
+        asrStatusItem.isEnabled = false
+        self.statusMenuItem = asrStatusItem
+        menu.addItem(asrStatusItem)
+        menu.addItem(NSMenuItem.separator())
 
         let showItem = NSMenuItem(title: "显示 Flowtype", action: #selector(showFlowtype), keyEquivalent: "")
         showItem.target = self
@@ -45,6 +88,14 @@ class StatusBarController {
         menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        let restartServerItem = NSMenuItem(title: "重启 ASR 服务", action: #selector(restartWhisperServer), keyEquivalent: "")
+        restartServerItem.target = self
+        menu.addItem(restartServerItem)
+
+        let viewLogsItem = NSMenuItem(title: "查看日志...", action: #selector(openLogs), keyEquivalent: "")
+        viewLogsItem.target = self
+        menu.addItem(viewLogsItem)
 
         let reloadItem = NSMenuItem(title: "重新加载配置", action: #selector(reloadConfiguration), keyEquivalent: "")
         reloadItem.target = self
@@ -84,6 +135,40 @@ class StatusBarController {
         }
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func restartWhisperServer() {
+        Task {
+            await WhisperServerManager.shared.restartServer()
+        }
+    }
+
+    @objc private func openLogs() {
+        AppLogger.openLogInFinder()
+    }
+
+    nonisolated func menuWillOpen(_ menu: NSMenu) {
+        Task { @MainActor in
+            let stage = WhisperServerManager.shared.serverStage
+            let statusText: String
+            switch stage {
+            case .ready:
+                statusText = "ASR 服务运行中"
+            case .modelLoading, .starting, .processStarted, .checking:
+                statusText = "ASR \(stage.rawValue)"
+            case .restarting:
+                statusText = "ASR 正在重启..."
+            case .installingVenv, .installingDeps, .downloadingModel:
+                statusText = "ASR \(stage.rawValue)"
+            case .needsInstall:
+                statusText = "ASR 未安装"
+            case .error:
+                statusText = "ASR 启动失败"
+            case .notStarted:
+                statusText = "ASR 未启动"
+            }
+            self.statusMenuItem?.title = statusText
+        }
     }
 
     @objc private func reloadConfiguration() {

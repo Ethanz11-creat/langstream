@@ -102,7 +102,24 @@ enum AudioFormatConverter {
         return newBuffer
     }
 
-    private static func createWAVHeader(dataSize: Int, sampleRate: Int32, channels: UInt16) -> Data {
+    /// Merge multiple WAV files (all same format: 16kHz mono 16-bit PCM) into one.
+    /// Each segment's 44-byte header is stripped and a new header is written.
+    static func mergeWAVSegments(_ segments: [Data], final: Data?) -> Data? {
+        var allPayload = Data()
+        for segment in segments {
+            if segment.count > 44 {
+                allPayload.append(segment.subdata(in: 44..<segment.count))
+            }
+        }
+        if let final = final, final.count > 44 {
+            allPayload.append(final.subdata(in: 44..<final.count))
+        }
+        guard !allPayload.isEmpty else { return nil }
+        let header = createWAVHeader(dataSize: allPayload.count, sampleRate: 16000, channels: 1)
+        return header + allPayload
+    }
+
+    static func createWAVHeader(dataSize: Int, sampleRate: Int32, channels: UInt16) -> Data {
         var header = Data()
         let bitsPerSample: UInt16 = 16
         let byteRate = sampleRate * Int32(channels) * Int32(bitsPerSample / 8)

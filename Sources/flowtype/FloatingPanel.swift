@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+/// A non-activating floating panel that serves purely as a visual indicator.
+/// It never becomes the key window, so it never steals focus from the user's
+/// active text input field. The user can continue typing, pressing Return,
+/// and switching apps while the panel remains visible.
 class FloatingPanel: NSPanel {
     private var isDragging = false
     private var initialLocation: NSPoint = .zero
@@ -48,7 +52,7 @@ class FloatingPanel: NSPanel {
         }
     }
 
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     // MARK: - Drag via event monitors (avoids intercepting SwiftUI gestures)

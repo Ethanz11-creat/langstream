@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AudioVisualizer: View {
-    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var session: SessionController
 
     private let barCount = 9
     private let phases: [Double] = [0, 0.3, 0.6, 0.9, 1.2, 0.9, 0.6, 0.3, 0]
@@ -10,9 +10,9 @@ struct AudioVisualizer: View {
         HStack(spacing: 3) {
             ForEach(0..<barCount, id: \.self) { index in
                 AudioBar(
-                    amplitude: appState.amplitude,
+                    amplitude: session.amplitude,
                     phase: phases[index],
-                    isActive: appState.state.isRecordingIndicator
+                    isActive: session.sessionState.isRecordingIndicator
                 )
             }
         }
