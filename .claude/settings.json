@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/yiheng/pycode/flowtype-local log --oneline -20)",
+      "Bash(git add *)",
+      "Bash(rm /Users/yiheng/pycode/Flowtype/.git/worktrees/flowtype-local/index.lock)",
+      "Bash(git commit -m ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/yiheng/pycode/Flowtype/.git/worktrees/flowtype-local"
+    ]
+  }
+}
