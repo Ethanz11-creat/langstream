@@ -6,7 +6,7 @@ struct OnboardingView: View {
     @State private var hasAccessibility = false
     @State private var hasMicrophone = false
     @State private var micCheckDone = false
-    @StateObject private var serverManager = WhisperServerManager.shared
+    @ObservedObject private var modelState = QwenModelState.shared
     @StateObject private var store = ConfigurationStore.shared
 
     var body: some View {
@@ -208,7 +208,7 @@ struct OnboardingView: View {
             Text("本地语音识别")
                 .font(.system(size: 20, weight: .bold))
 
-            Text("FlowType 使用本地 Whisper 模型进行语音识别，\n所有数据都在本机处理，无需联网。")
+            Text("FlowType 使用本地 Qwen3-ASR 模型进行语音识别，\n所有数据都在本机处理，无需联网。")
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -234,12 +234,15 @@ struct OnboardingView: View {
                         .frame(width: 80)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(serverManager.serverStage == .modelLoading || serverManager.serverStage.isInstalling)
+                .disabled(modelState.status.isLoading)
             }
         }
         .onAppear {
-            if serverManager.serverStage == .notStarted {
-                Task { await serverManager.checkAndStart() }
+            if case .notLoaded = modelState.status {
+                Task {
+                    let provider = SessionController.shared.qwenProvider
+                    await modelState.loadModel(provider: provider)
+                }
             }
         }
     }
@@ -247,92 +250,57 @@ struct OnboardingView: View {
     @ViewBuilder
     private var asrStatusView: some View {
         VStack(spacing: 16) {
-            switch serverManager.serverStage {
+            switch modelState.status {
             case .ready:
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 40))
                     .foregroundColor(.green)
-                Text("本地模型已就绪")
+                Text("Qwen3-ASR 模型已就绪")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.green)
 
-            case .installingVenv, .installingDeps, .downloadingModel:
-                ProgressView()
-                    .controlSize(.large)
-                Text(serverManager.serverStage.statusTitle)
+            case .downloading(let progress, let detail):
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 200)
+                Text(detail)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.orange)
-                if let detail = serverManager.installDetail {
-                    Text(detail)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity)
-                }
+                Text("首次下载约 300 MB，请稍候。")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
 
-            case .modelLoading, .starting, .processStarted, .checking, .restarting:
+            case .loading:
                 ProgressView()
                     .controlSize(.large)
-                Text(serverManager.serverStage.statusTitle)
+                Text("正在加载模型...")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.orange)
 
-            case .needsInstall:
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 40))
-                    .foregroundColor(.blue)
-
-                Text("需要安装本地模型环境")
-                    .font(.system(size: 15, weight: .medium))
-
-                if WhisperSetupChecker.checkModelCache() {
-                    Text("模型已缓存，仅需安装 Python 依赖。")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                } else {
-                    Text("首次安装需要下载约 1.6 GB 模型文件，\n请确保网络通畅。")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-
-                Button(action: { Task { await serverManager.install() } }) {
-                    Text("一键安装")
-                        .frame(width: 140)
-                }
-                .buttonStyle(.borderedProminent)
-
-            case .error:
+            case .error(let msg):
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 40))
                     .foregroundColor(.red)
-                Text("安装失败")
+                Text("模型加载失败")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.red)
-                if let error = serverManager.lastError {
-                    Text(error)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .lineLimit(3)
-                }
-                HStack(spacing: 12) {
-                    Button("重试") {
-                        Task { await serverManager.retry() }
+                Text(msg)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
+                Button("重试") {
+                    Task {
+                        let provider = SessionController.shared.qwenProvider
+                        await modelState.loadModel(provider: provider)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    Button("查看日志") {
-                        AppLogger.openLogInFinder()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
 
-            case .notStarted:
+            case .notLoaded:
                 ProgressView()
                     .controlSize(.large)
-                Text("正在检查环境...")
+                Text("正在检查模型...")
                     .font(.system(size: 14))
                     .foregroundColor(.secondary)
             }
@@ -419,8 +387,8 @@ struct OnboardingView: View {
                     ok: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
                 )
                 statusRow(
-                    title: "本地语音识别",
-                    ok: serverManager.serverStage == .ready
+                    title: "Qwen3-ASR 模型",
+                    ok: modelState.status == .ready
                 )
                 statusRow(
                     title: "文本润色 API",
@@ -469,8 +437,11 @@ struct OnboardingView: View {
 
     private func completeOnboarding() {
         UserDefaults.standard.set(true, forKey: "flowtype.onboardingCompleted")
-        if serverManager.serverStage == .notStarted || serverManager.serverStage == .needsInstall {
-            Task { await serverManager.checkAndStart() }
+        if case .notLoaded = modelState.status {
+            Task {
+                let provider = SessionController.shared.qwenProvider
+                await modelState.loadModel(provider: provider)
+            }
         }
         NSApp.keyWindow?.close()
     }

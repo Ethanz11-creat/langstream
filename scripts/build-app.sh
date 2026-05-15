@@ -23,33 +23,25 @@ cp Sources/flowtype/Resources/*.json build/${APP_NAME}.app/Contents/Resources/ 2
 cp Sources/flowtype/Resources/*.icns build/${APP_NAME}.app/Contents/Resources/ 2>/dev/null || true
 cp Sources/flowtype/Resources/status_bar_icon*.png build/${APP_NAME}.app/Contents/Resources/ 2>/dev/null || true
 
-# Copy local ASR Python service into bundle
-echo "📦 Copying whisper_server into app bundle..."
-mkdir -p build/${APP_NAME}.app/Contents/Resources/services/whisper_server
-cp -R services/whisper_server/* build/${APP_NAME}.app/Contents/Resources/services/whisper_server/ 2>/dev/null || true
-
-# Copy install script into bundle (used by SettingsView "one-click install" button)
-mkdir -p build/${APP_NAME}.app/Contents/Resources/scripts
-cp scripts/setup_whisper.sh build/${APP_NAME}.app/Contents/Resources/scripts/ 2>/dev/null || true
-
-# Download and bundle uv binary (so users don't need uv pre-installed)
-UV_VERSION="0.7.2"
-UV_ARCH=$(uname -m)
-if [ "$UV_ARCH" = "arm64" ]; then
-    UV_PLATFORM="aarch64-apple-darwin"
+# Copy MLX Metal shader library (required for Qwen3-ASR GPU inference).
+# SPM cannot compile .metal shaders; we use the pre-compiled metallib from
+# the Python mlx-metal wheel cached by pip/uv.
+MLX_METALLIB=""
+for candidate in \
+    "$HOME/.cache/uv/archive-v0/"*/mlx/lib/mlx.metallib \
+    "$HOME/.cache/pip/"*/mlx/lib/mlx.metallib \
+    "$(python3 -c 'import mlx, pathlib; print(pathlib.Path(mlx.__file__).parent / "lib" / "mlx.metallib")' 2>/dev/null)"; do
+    if [ -f "$candidate" ]; then
+        MLX_METALLIB="$candidate"
+        break
+    fi
+done
+if [ -n "$MLX_METALLIB" ]; then
+    cp "$MLX_METALLIB" build/${APP_NAME}.app/Contents/MacOS/mlx.metallib
+    echo "✅ MLX metallib copied from $MLX_METALLIB"
 else
-    UV_PLATFORM="x86_64-apple-darwin"
-fi
-UV_DIR="build/${APP_NAME}.app/Contents/Resources/bin"
-mkdir -p "$UV_DIR"
-if [ ! -f "$UV_DIR/uv" ]; then
-    echo "📦 Downloading uv ${UV_VERSION} (${UV_PLATFORM})..."
-    curl -sL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_PLATFORM}.tar.gz" \
-        | tar xz -C "$UV_DIR" --strip-components=1 --include='*/uv'
-    chmod +x "$UV_DIR/uv"
-    echo "✅ uv bundled at ${UV_DIR}/uv"
-else
-    echo "✅ uv already bundled"
+    echo "⚠️  WARNING: mlx.metallib not found. Install Python mlx-metal (pip install mlx) to provide it."
+    echo "   Qwen3-ASR will crash at runtime without this file."
 fi
 
 # Generate Info.plist
@@ -75,7 +67,7 @@ cat > build/${APP_NAME}.app/Contents/Info.plist << 'EOF'
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>15.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

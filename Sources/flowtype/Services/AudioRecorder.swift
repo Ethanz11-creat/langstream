@@ -11,16 +11,15 @@ enum AudioRecorderError: Error, Equatable {
 struct RecordingOutput: @unchecked Sendable {
     /// VU-meter amplitude stream (for UI animation).
     let amplitude: AsyncStream<Float>
-    /// Real-time audio segment stream for the transcription pipeline.
-    let segments: AsyncStream<AudioSegment>
 }
 
 final class AudioRecorder: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private nonisolated(unsafe) var amplitudeContinuation: AsyncStream<Float>.Continuation?
 
-    // Real-time segment former (replaces AudioSlicer)
-    private var segmentFormer: StreamingSegmentFormer?
+    // Raw sample accumulator for batch ASR (Qwen3-ASR)
+    private var rawSamples: [Float] = []
+    private let sampleLock = OSAllocatedUnfairLock()
 
     // Recording state
     private let stateLock = OSAllocatedUnfairLock()
@@ -42,11 +41,6 @@ final class AudioRecorder: @unchecked Sendable {
 
     /// Called when no audio tap callbacks have been received for a while.
     var onRecordingFrozen: (() -> Void)?
-
-    /// Update the segment former's view of recognition queue depth.
-    func updateQueueDepth(_ depth: Int) {
-        segmentFormer?.pendingQueueDepth = depth
-    }
 
     // MARK: - Heartbeat detection
     private nonisolated(unsafe) var lastTapCallCount = 0
@@ -83,20 +77,6 @@ final class AudioRecorder: @unchecked Sendable {
         let freshEngine = AVAudioEngine()
         self.engine = freshEngine
 
-        // Start segment former
-        let former = StreamingSegmentFormer()
-        let config = Configuration.shared
-        former.minDuration = config.segmentMinDuration
-        former.maxDuration = config.segmentMaxDuration
-        former.overlapDuration = config.segmentOverlapDuration
-        former.vadSilenceThresholdMs = config.vadSilenceThresholdMs
-        former.vadRequestTimeoutMs = config.vadRequestTimeoutMs
-        former.vadMaxFailures = config.vadMaxFailures
-        former.amplitudeSilenceThresholdDB = config.amplitudeSilenceThresholdDB
-        former.amplitudeSilenceDuration = config.amplitudeSilenceDuration
-        self.segmentFormer = former
-        let segmentStream = former.startForming()
-
         let inputNode = freshEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
         print("[AudioRecorder] Hardware input format: \(inputFormat)")
@@ -121,6 +101,9 @@ final class AudioRecorder: @unchecked Sendable {
         tapCallCount = 0
         lastTapCallCount = 0
         lastTapTimestamp = Date()
+        sampleLock.withLock {
+            rawSamples.removeAll(keepingCapacity: true)
+        }
         heartbeatTimer.schedule(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] in
             guard let self = self else { return }
             guard self.isRecording && !self.isStopping else { return }
@@ -164,12 +147,15 @@ final class AudioRecorder: @unchecked Sendable {
                 // Forward to streaming recognizer (AppleSpeech preview)
                 self.onAudioBuffer?(convertedBuffer)
 
-                // Feed to segment former
-                self.segmentFormer?.appendBuffer(convertedBuffer)
-
-                // Yield average amplitude for VU meter
+                // Accumulate raw samples for batch ASR
                 if let data = convertedBuffer.floatChannelData?[0] {
                     let frames = Int(convertedBuffer.frameLength)
+                    let samplesArray = Array(UnsafeBufferPointer(start: data, count: frames))
+                    self.sampleLock.withLock {
+                        self.rawSamples.append(contentsOf: samplesArray)
+                    }
+
+                    // Yield average amplitude for VU meter
                     var sum: Float = 0
                     for i in 0..<frames {
                         sum += abs(data[i])
@@ -189,7 +175,7 @@ final class AudioRecorder: @unchecked Sendable {
             }
         }
 
-        return RecordingOutput(amplitude: amplitudeStream, segments: segmentStream)
+        return RecordingOutput(amplitude: amplitudeStream)
     }
 
     nonisolated func stopRecording() {
@@ -215,16 +201,21 @@ final class AudioRecorder: @unchecked Sendable {
         amplitudeContinuation?.finish()
         amplitudeContinuation = nil
 
-        // Finish segment former (emits final segment + closes stream)
-        segmentFormer?.finish()
-        segmentFormer = nil
-
         // Stop engine
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
         stateLock.withLock {
             _isStopping = false
+        }
+    }
+
+    /// Take accumulated raw Float32 samples and clear the buffer.
+    nonisolated func takeAccumulatedSamples() -> [Float] {
+        sampleLock.withLock {
+            let samples = rawSamples
+            rawSamples.removeAll(keepingCapacity: false)
+            return samples
         }
     }
 }

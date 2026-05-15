@@ -24,6 +24,8 @@ final class SessionController: ObservableObject {
     private let llmService = LLMService()
     private let appleSpeechProvider = AppleSpeechProvider()
 
+    var qwenProvider: QwenASRProvider { speechRouter.qwenProvider }
+
     // MARK: - Published State
 
     @Published private(set) var sessionState: SessionState = .idle
@@ -40,13 +42,7 @@ final class SessionController: ObservableObject {
 
     private var recordingTask: Task<Void, Never>?
     private var processingTask: Task<Void, Never>?
-    private var streamingTask: Task<Void, Never>?
     private var previewStreamTask: Task<Void, Never>?
-
-    // MARK: - Pipeline Components (per-session)
-
-    private var pipeline: TranscriptionPipeline?
-    private var accumulator: StableTextAccumulator?
 
     // MARK: - Recording Timer
 
@@ -104,11 +100,6 @@ final class SessionController: ObservableObject {
         hasInjected = false
         recordingStartTime = Date()
 
-        // Create per-session pipeline components
-        pipeline = TranscriptionPipeline()
-        accumulator = StableTextAccumulator()
-        pipeline?.accumulator = accumulator
-
         previewText = ""
         amplitude = 0.0
         pendingPreviewText = ""
@@ -139,7 +130,8 @@ final class SessionController: ObservableObject {
         recordingTask?.cancel()
         recordingTask = nil
 
-        sessionState = .processing(provider: WhisperServerManager.shared.isServerReady ? "本地识别" : "本地识别(兜底)")
+        let providerName = speechRouter.qwenProvider.isLoaded ? "Qwen3-ASR" : "AppleSpeech"
+        sessionState = .processing(provider: providerName)
 
         processingTask = Task { [weak self] in
             guard let self else { return }
@@ -154,11 +146,8 @@ final class SessionController: ObservableObject {
         recordingTask = nil
         processingTask?.cancel()
         processingTask = nil
-        streamingTask?.cancel()
-        streamingTask = nil
         previewStreamTask?.cancel()
         previewStreamTask = nil
-        pipeline?.cancel()
 
         audioRecorder.onAudioBuffer = nil
         audioRecorder.onRecordingFrozen = nil
@@ -194,7 +183,7 @@ final class SessionController: ObservableObject {
             let output = try await audioRecorder.startRecording()
             AppLogger.log("[SessionController#\(id)] AudioRecorder started")
 
-            // AppleSpeech preview
+            // AppleSpeech real-time preview
             audioRecorder.onAudioBuffer = { [weak self] buffer in
                 self?.appleSpeechProvider.appendAudioBuffer(buffer)
             }
@@ -209,26 +198,7 @@ final class SessionController: ObservableObject {
                 }
             }
 
-            // Streaming transcription pipeline
-            guard let pipeline = self.pipeline, let accumulator = self.accumulator else { return }
-
-            let resultStream = pipeline.start(
-                segments: output.segments,
-                provider: speechRouter.primaryProvider,
-                fallback: speechRouter.fallbackProvider
-            )
-
-            self.streamingTask = Task { [weak self] in
-                guard let self else { return }
-                for await result in resultStream {
-                    guard self.activeSessionID == id else { break }
-                    let _ = accumulator.accept(result)
-                    // Bridge queue depth to segment former for pressure adaptation
-                    self.audioRecorder.updateQueueDepth(pipeline.pendingDepth)
-                }
-            }
-
-            AppLogger.log("[SessionController#\(id)] Streaming pipeline started")
+            AppLogger.log("[SessionController#\(id)] Recording in progress")
             for await amp in output.amplitude {
                 try checkCancellation(id: id)
                 if abs(self.amplitude - amp) > 0.005 {
@@ -262,7 +232,6 @@ final class SessionController: ObservableObject {
             AppLogger.log("[SessionController#\(id)] Processing phase ended (total: \(String(format: "%.1f", totalProcessingTime))s)")
         }
 
-        // Stop recording — triggers segmentFormer.finish() which emits final segment
         let stopAudioStart = Date()
         audioRecorder.stopRecording()
         audioRecorder.onAudioBuffer = nil
@@ -272,27 +241,29 @@ final class SessionController: ObservableObject {
         let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
         AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: '\(localPreviewText.prefix(80))'")
 
-        // Wait for streaming pipeline to finish
-        let waitStreamStart = Date()
-        let streamCompleted = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await self.streamingTask?.value; return true }
-            group.addTask { try? await Task.sleep(nanoseconds: 15_000_000_000); return false }
-            let first = await group.next()!
-            group.cancelAll()
-            return first
-        }
-        if !streamCompleted {
-            AppLogger.log("[SessionController#\(id)] Streaming pipeline timed out after 15s")
-            streamingTask?.cancel()
-            pipeline?.cancel()
-        }
-        streamingTask = nil
-        AppLogger.log("[SessionController#\(id)] Waited for streaming in \(String(format: "%.2f", Date().timeIntervalSince(waitStreamStart)))s")
+        let rawSamples = audioRecorder.takeAccumulatedSamples()
+        let audioDuration = Double(rawSamples.count) / 16000.0
+        AppLogger.log("[SessionController#\(id)] Raw samples: \(rawSamples.count) (\(String(format: "%.1f", audioDuration))s)")
 
-        // Finalize accumulator — freeze pending tail
-        let mergeStart = Date()
-        var finalASRText = accumulator?.finalize() ?? ""
-        AppLogger.log("[SessionController#\(id)] Accumulator finalized: \(finalASRText.count) chars (merge took \(String(format: "%.2f", Date().timeIntervalSince(mergeStart)))s)")
+        var finalASRText = ""
+
+        if speechRouter.qwenProvider.isLoaded && !rawSamples.isEmpty {
+            AppLogger.log("[SessionController#\(id)] Using Qwen3-ASR batch transcription")
+            sessionState = .processing(provider: "Qwen3-ASR")
+
+            let asrStart = Date()
+            do {
+                finalASRText = try await speechRouter.qwenProvider.transcribe(
+                    samples: rawSamples,
+                    language: nil,
+                    context: nil
+                )
+                AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: '\(finalASRText.prefix(200))'")
+            } catch {
+                AppLogger.log("[SessionController#\(id)] Qwen3-ASR failed: \(error)")
+                finalASRText = ""
+            }
+        }
 
         if finalASRText.isEmpty, !localPreviewText.isEmpty {
             AppLogger.log("[SessionController#\(id)] Using AppleSpeech preview as fallback")
@@ -461,17 +432,12 @@ final class SessionController: ObservableObject {
         recordingTask = nil
         processingTask?.cancel()
         processingTask = nil
-        streamingTask?.cancel()
-        streamingTask = nil
         previewDebounceTask?.cancel()
         previewDebounceTask = nil
         previewStreamTask?.cancel()
         previewStreamTask = nil
         errorDismissTask?.cancel()
         errorDismissTask = nil
-        pipeline?.cancel()
-        pipeline = nil
-        accumulator = nil
         stopRecordingTimer()
         WindowManager.shared.hide()
     }

@@ -5,12 +5,19 @@ import PackageDescription
 let package = Package(
     name: "FlowType",
     platforms: [
-        .macOS(.v14) // 设置支持的系统版本
+        .macOS(.v15)
+    ],
+    dependencies: [
+        .package(url: "https://github.com/soniqo/speech-swift.git", from: "0.0.15"),
     ],
     targets: [
         .executableTarget(
             name: "FlowType",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Qwen3ASR", package: "speech-swift"),
+                .product(name: "SpeechVAD", package: "speech-swift"),
+                .product(name: "AudioCommon", package: "speech-swift"),
+            ],
             path: "Sources/flowtype",
             resources: [
                 .copy("Resources/tech_terms.json"),
@@ -18,7 +25,6 @@ let package = Package(
                 .copy("Resources/AppIcon.icns"),
                 .copy("Resources/status_bar_icon.png"),
                 .copy("Resources/status_bar_icon@2x.png"),
-                .copy("Resources/services/whisper_server")
             ],
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"]) // 允许使用 @main

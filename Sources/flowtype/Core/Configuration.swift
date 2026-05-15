@@ -70,25 +70,8 @@ struct ServiceConfig: Codable, Equatable {
 // MARK: - Configuration
 
 struct Configuration: Codable, Equatable {
-    // Local Whisper ASR
-    var whisperModel: String = "mlx-community/whisper-large-v3-turbo"
-    var whisperLanguage: WhisperLanguage = .zh
-
-    // Streaming segment formation (VAD-driven adaptive pipeline)
-    var segmentMinDuration: Double = 3.0
-    var segmentMaxDuration: Double = 30.0
-    var segmentOverlapDuration: Double = 1.0
-    var vadSilenceThresholdMs: Int = 800
-    var vadRequestTimeoutMs: Int = 500
-    var vadMaxFailures: Int = 3
-
-    // Amplitude fallback (when VAD unavailable)
-    var amplitudeSilenceThresholdDB: Float = -40.0
-    var amplitudeSilenceDuration: Double = 0.5
-
-    // Experimental cross-segment context (V1: both false)
-    var experimentalContextEnabled: Bool = false
-    var experimentalConditionEnabled: Bool = false
+    // ASR
+    var asrLanguage: WhisperLanguage = .zh
 
     // LLM
     var llmProvider: String = "SiliconFlow"
@@ -131,15 +114,8 @@ struct Configuration: Codable, Equatable {
 
     // MARK: - Backward Compatibility Accessors
 
-    /// Legacy apiKey — returns LLM apiKey for services that haven't been updated
-    var apiKey: String {
-        llmApiKey
-    }
-
-    /// Legacy baseURL — returns LLM baseURL
-    var baseURL: String {
-        llmBaseURL
-    }
+    var apiKey: String { llmApiKey }
+    var baseURL: String { llmBaseURL }
 
     // MARK: - Effective Values
 
@@ -160,21 +136,17 @@ struct Configuration: Codable, Equatable {
 
     // MARK: - Backward-Compatible Decoding
 
+    private enum LegacyKeys: String, CodingKey {
+        case whisperLanguage
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try? decoder.container(keyedBy: LegacyKeys.self)
         let d = Configuration.default
-        whisperModel = (try? c.decode(String.self, forKey: .whisperModel)) ?? d.whisperModel
-        whisperLanguage = (try? c.decode(WhisperLanguage.self, forKey: .whisperLanguage)) ?? d.whisperLanguage
-        segmentMinDuration = (try? c.decode(Double.self, forKey: .segmentMinDuration)) ?? d.segmentMinDuration
-        segmentMaxDuration = (try? c.decode(Double.self, forKey: .segmentMaxDuration)) ?? d.segmentMaxDuration
-        segmentOverlapDuration = (try? c.decode(Double.self, forKey: .segmentOverlapDuration)) ?? d.segmentOverlapDuration
-        vadSilenceThresholdMs = (try? c.decode(Int.self, forKey: .vadSilenceThresholdMs)) ?? d.vadSilenceThresholdMs
-        vadRequestTimeoutMs = (try? c.decode(Int.self, forKey: .vadRequestTimeoutMs)) ?? d.vadRequestTimeoutMs
-        vadMaxFailures = (try? c.decode(Int.self, forKey: .vadMaxFailures)) ?? d.vadMaxFailures
-        amplitudeSilenceThresholdDB = (try? c.decode(Float.self, forKey: .amplitudeSilenceThresholdDB)) ?? d.amplitudeSilenceThresholdDB
-        amplitudeSilenceDuration = (try? c.decode(Double.self, forKey: .amplitudeSilenceDuration)) ?? d.amplitudeSilenceDuration
-        experimentalContextEnabled = (try? c.decode(Bool.self, forKey: .experimentalContextEnabled)) ?? d.experimentalContextEnabled
-        experimentalConditionEnabled = (try? c.decode(Bool.self, forKey: .experimentalConditionEnabled)) ?? d.experimentalConditionEnabled
+        asrLanguage = (try? c.decode(WhisperLanguage.self, forKey: .asrLanguage))
+            ?? (try? legacy?.decode(WhisperLanguage.self, forKey: .whisperLanguage))
+            ?? d.asrLanguage
         llmProvider = (try? c.decode(String.self, forKey: .llmProvider)) ?? d.llmProvider
         llmBaseURL = (try? c.decode(String.self, forKey: .llmBaseURL)) ?? d.llmBaseURL
         llmApiKey = (try? c.decode(String.self, forKey: .llmApiKey)) ?? d.llmApiKey
@@ -188,7 +160,6 @@ struct Configuration: Codable, Equatable {
 }
 
 extension Configuration {
-    /// Backward-compatible singleton accessor
     static var shared: Configuration {
         ConfigurationStore.shared.current
     }

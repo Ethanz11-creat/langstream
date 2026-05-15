@@ -1,11 +1,11 @@
 import Foundation
 
 final class SpeechRouter: @unchecked Sendable {
-    let primaryProvider: MLXWhisperProvider
+    let qwenProvider: QwenASRProvider
     let fallbackProvider: AppleSpeechProvider
 
     init() {
-        self.primaryProvider = MLXWhisperProvider()
+        self.qwenProvider = QwenASRProvider()
         self.fallbackProvider = AppleSpeechProvider()
     }
 }

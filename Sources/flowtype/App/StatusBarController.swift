@@ -9,8 +9,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindowController: SettingsWindowController?
     private var statusMenuItem: NSMenuItem?
-    private var cancellable: AnyCancellable?
     private var sessionCancellable: AnyCancellable?
+    private var modelCancellable: AnyCancellable?
 
     private override init() {
         super.init()
@@ -22,13 +22,11 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         guard let button = statusItem?.button else { return }
 
-        // Load status bar icon from SPM bundle resources
         if let image = Bundle.module.image(forResource: "status_bar_icon") {
             image.size = NSSize(width: 18, height: 18)
             image.isTemplate = true
             button.image = image
         } else {
-            // Fallback to system icon if custom icon not found
             button.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Flowtype")
         }
 
@@ -38,23 +36,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         buildMenu()
 
-        cancellable = WhisperServerManager.shared.$serverStage
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] stage in
-                guard let self else { return }
-                if case .idle = SessionController.shared.sessionState {
-                    self.statusItem?.button?.toolTip = "FlowType — \(stage.rawValue)"
-                }
-            }
-
         sessionCancellable = SessionController.shared.$sessionState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 guard let self else { return }
                 switch state {
                 case .idle:
-                    let stage = WhisperServerManager.shared.serverStage
-                    self.statusItem?.button?.toolTip = "FlowType — \(stage.rawValue)"
+                    self.updateIdleTooltip()
                 case .recording:
                     self.statusItem?.button?.toolTip = "FlowType — 录音中..."
                 case .processing:
@@ -67,6 +55,30 @@ class StatusBarController: NSObject, NSMenuDelegate {
                     self.statusItem?.button?.toolTip = "FlowType — 错误: \(msg)"
                 }
             }
+
+        modelCancellable = QwenModelState.shared.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if case .idle = SessionController.shared.sessionState {
+                    self.updateIdleTooltip()
+                }
+            }
+    }
+
+    private func updateIdleTooltip() {
+        switch QwenModelState.shared.status {
+        case .ready:
+            statusItem?.button?.toolTip = "FlowType — Qwen3-ASR 就绪"
+        case .downloading(let progress, _):
+            statusItem?.button?.toolTip = "FlowType — 下载中 \(Int(progress * 100))%"
+        case .loading:
+            statusItem?.button?.toolTip = "FlowType — 模型加载中..."
+        case .error:
+            statusItem?.button?.toolTip = "FlowType — 模型加载失败"
+        case .notLoaded:
+            statusItem?.button?.toolTip = "FlowType — 等待加载模型"
+        }
     }
 
     private func buildMenu() {
@@ -88,10 +100,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
-
-        let restartServerItem = NSMenuItem(title: "重启 ASR 服务", action: #selector(restartWhisperServer), keyEquivalent: "")
-        restartServerItem.target = self
-        menu.addItem(restartServerItem)
 
         let viewLogsItem = NSMenuItem(title: "查看日志...", action: #selector(openLogs), keyEquivalent: "")
         viewLogsItem.target = self
@@ -137,35 +145,24 @@ class StatusBarController: NSObject, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func restartWhisperServer() {
-        Task {
-            await WhisperServerManager.shared.restartServer()
-        }
-    }
-
     @objc private func openLogs() {
         AppLogger.openLogInFinder()
     }
 
     nonisolated func menuWillOpen(_ menu: NSMenu) {
         Task { @MainActor in
-            let stage = WhisperServerManager.shared.serverStage
             let statusText: String
-            switch stage {
+            switch QwenModelState.shared.status {
             case .ready:
-                statusText = "ASR 服务运行中"
-            case .modelLoading, .starting, .processStarted, .checking:
-                statusText = "ASR \(stage.rawValue)"
-            case .restarting:
-                statusText = "ASR 正在重启..."
-            case .installingVenv, .installingDeps, .downloadingModel:
-                statusText = "ASR \(stage.rawValue)"
-            case .needsInstall:
-                statusText = "ASR 未安装"
-            case .error:
-                statusText = "ASR 启动失败"
-            case .notStarted:
-                statusText = "ASR 未启动"
+                statusText = "Qwen3-ASR 就绪"
+            case .downloading(let progress, _):
+                statusText = "下载中 \(Int(progress * 100))%"
+            case .loading:
+                statusText = "模型加载中..."
+            case .error(let msg):
+                statusText = "加载失败: \(msg.prefix(30))"
+            case .notLoaded:
+                statusText = "等待加载模型"
             }
             self.statusMenuItem?.title = statusText
         }
@@ -179,7 +176,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
         WindowManager.shared.reloadHotkey()
 
-        // Show a brief notification via status bar tooltip or temporary title
         if let button = statusItem?.button {
             let originalTitle = button.title
             button.title = "已重新加载"

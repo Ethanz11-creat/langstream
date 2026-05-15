@@ -40,10 +40,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !hasAccessibility {
                 PermissionHelper.showPermissionGuide()
             }
-            AppLogger.log("[AppDelegate] Starting WhisperServerManager checkAndStart...")
             Task {
-                await WhisperServerManager.shared.checkAndStart()
-                AppLogger.log("[AppDelegate] WhisperServerManager checkAndStart completed, stage=\(WhisperServerManager.shared.serverStage)")
+                await loadQwenASRModel()
             }
         }
     }
@@ -54,11 +52,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = OnboardingWindowController()
         controller.onClose = { [weak self] in
             self?.onboardingWindowController = nil
-            // After onboarding closes, start server if not already running
-            let mgr = WhisperServerManager.shared
-            if mgr.serverStage == .notStarted || mgr.serverStage == .needsInstall {
-                Task { await mgr.checkAndStart() }
-            }
         }
         onboardingWindowController = controller
         controller.showWindow(nil)
@@ -66,13 +59,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Don't terminate when settings window is closed
         return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        AppLogger.log("[AppDelegate] App will terminate — stopping Whisper server...")
-        WhisperServerManager.shared.stopServer()
-        AppLogger.log("[AppDelegate] Whisper server stopped")
+        AppLogger.log("[AppDelegate] App will terminate")
+    }
+
+    private func loadQwenASRModel() async {
+        let provider = await SessionController.shared.qwenProvider
+        AppLogger.log("[AppDelegate] Loading Qwen3-ASR model...")
+        await QwenModelState.shared.loadModel(provider: provider)
+        if case .ready = await QwenModelState.shared.status {
+            AppLogger.log("[AppDelegate] Qwen3-ASR model loaded successfully")
+        } else {
+            AppLogger.log("[AppDelegate] Qwen3-ASR model loading failed")
+        }
     }
 }

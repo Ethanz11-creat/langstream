@@ -18,8 +18,8 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
             var needsSave = false
 
             if storedVersion < 1 {
-                if config.whisperLanguage == .auto {
-                    config.whisperLanguage = .zh
+                if config.asrLanguage == .auto {
+                    config.asrLanguage = .zh
                 }
                 needsSave = true
             }

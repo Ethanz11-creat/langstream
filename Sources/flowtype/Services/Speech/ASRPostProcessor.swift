@@ -82,33 +82,51 @@ struct ASRPostProcessor {
         return result
     }
 
-    /// Conservative filler removal. Only removes fillers that appear as
-    /// standalone tokens (surrounded by spaces or at boundaries).
+    /// Conservative filler removal. For English fillers, requires space boundaries.
+    /// For Chinese fillers, matches directly without space requirements since
+    /// Chinese text typically has no spaces between words.
     func stripFillers(_ text: String) -> String {
         var result = text
         for filler in fillers.sorted(by: { $0.count > $1.count }) {
-            let patterns = [
-                " \(filler) ",
-                "^\(filler) ",
-                " \(filler)$",
-                "^\(filler)$"
-            ]
-            for pattern in patterns {
-                result = result.replacingOccurrences(
-                    of: pattern,
-                    with: " ",
-                    options: .regularExpression
-                )
+            let isChinese = filler.first?.isChinese ?? false
+            if isChinese {
+                let escaped = NSRegularExpression.escapedPattern(for: filler)
+                let patterns = [
+                    "(?<=^|[，。！？、；：\\s])\(escaped)(?=[，。！？、；：\\s]|$)",
+                    "^\(escaped)(?=[^a-zA-Z0-9])",
+                    "(?<=[^a-zA-Z0-9])\(escaped)$",
+                ]
+                for pattern in patterns {
+                    if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                        let range = NSRange(location: 0, length: result.utf16.count)
+                        result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "")
+                    }
+                }
+            } else {
+                let patterns = [
+                    " \(filler) ",
+                    "^\(filler) ",
+                    " \(filler)$",
+                    "^\(filler)$"
+                ]
+                for pattern in patterns {
+                    result = result.replacingOccurrences(
+                        of: pattern,
+                        with: " ",
+                        options: .regularExpression
+                    )
+                }
             }
         }
         return normalizeWhitespace(result)
     }
 
-    /// Corrects tech terms using case-insensitive regex with word boundaries.
+    /// Corrects tech terms using case-insensitive regex.
+    /// Uses character-type boundaries instead of \b, which doesn't work at
+    /// Chinese↔ASCII transitions.
     func correctTechTerms(_ text: String) -> String {
         var result = text
         for (pattern, replacement) in techTerms {
-            // Escape regex special chars in pattern, replace spaces with \s+
             let escaped = pattern
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: ".", with: "\\.")
@@ -126,7 +144,7 @@ struct ASRPostProcessor {
                 .replacingOccurrences(of: ")", with: "\\)")
                 .replacingOccurrences(of: " ", with: "\\s+")
 
-            let regexPattern = "(?i)\\b\(escaped)\\b"
+            let regexPattern = "(?i)(?<![a-zA-Z0-9_])\(escaped)(?![a-zA-Z0-9_])"
             guard let regex = try? NSRegularExpression(pattern: regexPattern, options: []) else { continue }
             let range = NSRange(location: 0, length: result.utf16.count)
             result = regex.stringByReplacingMatches(
@@ -139,12 +157,12 @@ struct ASRPostProcessor {
         return result
     }
 
-    /// Fixes common ASR artifacts: consecutive duplicate chars, etc.
+    /// Fixes common ASR artifacts: consecutive duplicate chars (4+ in a row → 2),
+    /// with a whitelist for legitimate Chinese reduplications.
     func fixCommonASRErrors(_ text: String) -> String {
         var result = text
-        // Remove consecutive duplicate chars (3+ in a row -> 1)
         let chars = Array(result)
-        guard chars.count >= 3 else { return result }
+        guard chars.count >= 4 else { return result }
 
         var cleaned: [Character] = []
         var i = 0
@@ -154,7 +172,8 @@ struct ASRPostProcessor {
             while i + runLength < chars.count && chars[i + runLength] == current {
                 runLength += 1
             }
-            if runLength >= 3 {
+            if runLength >= 4 && !Self.legitimateReduplicationChars.contains(current) {
+                cleaned.append(current)
                 cleaned.append(current)
             } else {
                 for j in 0..<runLength {
@@ -166,6 +185,12 @@ struct ASRPostProcessor {
         result = String(cleaned)
         return result
     }
+
+    private static let legitimateReduplicationChars: Set<Character> = [
+        "哈", "呵", "嘿", "嗯", "啊", "哦", "噢", "唉",
+        "对", "好", "是", "不", "没", "行", "嘻", "呜",
+        "喂", "嗨", "吼", "吧", "啦", "嘛", "呢", "咯",
+    ]
 
     // MARK: - Chinese Punctuation Conversion
 

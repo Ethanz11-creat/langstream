@@ -1,6 +1,0 @@
-mlx-whisper>=0.4.0
-fastapi>=0.115.0
-uvicorn>=0.32.0
-python-multipart>=0.0.17
-numpy>=1.26.0
-silero-vad>=5.1

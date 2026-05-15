@@ -16,7 +16,6 @@ struct ProviderPicker: View {
         .onChange(of: provider) { _, newValue in
             if let preset = ProviderPreset.all.first(where: { $0.name == newValue }),
                !preset.isCustom {
-                // Auto-fill base URL if current one is empty or matches another preset
                 if baseURL.isEmpty || ProviderPreset.all.contains(where: { $0.baseURL == baseURL && !$0.isCustom }) {
                     baseURL = preset.baseURL
                 }
@@ -96,43 +95,93 @@ struct ModelIDField: View {
     }
 }
 
-// MARK: - Install Progress Banner
+// MARK: - Qwen3-ASR Status Card
 
-struct InstallProgressBanner: View {
-    @ObservedObject var manager: WhisperServerManager = .shared
-    var onRetry: () -> Void
+struct QwenModelStatusCard: View {
+    @ObservedObject private var modelState = QwenModelState.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if manager.serverStage.isInstalling {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(manager.serverStage.statusTitle)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 16))
+                    .foregroundColor(statusColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(statusTitle)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.orange)
-                }
-                if let detail = manager.installDetail {
-                    Text(detail)
-                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(statusColor)
+                    Text("aufklarer/Qwen3-ASR-0.6B-MLX-4bit")
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                if case .error = modelState.status {
+                    Button("重试") {
+                        Task {
+                            let provider = SessionController.shared.qwenProvider
+                            await modelState.loadModel(provider: provider)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
             }
-            if manager.serverStage == .error, let error = manager.lastError {
-                Text(error)
-                    .font(.system(size: 12))
-                    .foregroundColor(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
-                    Button("重试", action: onRetry)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    Button("查看日志") { AppLogger.openLogInFinder() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
+
+            if case .downloading(let progress, let detail) = modelState.status {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(height: 4)
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
+
+            if case .loading = modelState.status {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .frame(height: 4)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(statusColor.opacity(0.3), lineWidth: 1)
+        )
+    }
+
+    private var statusIcon: String {
+        switch modelState.status {
+        case .ready: return "checkmark.circle.fill"
+        case .downloading, .loading: return "arrow.triangle.2.circlepath"
+        case .error: return "xmark.circle.fill"
+        case .notLoaded: return "circle.dashed"
+        }
+    }
+
+    private var statusColor: Color {
+        switch modelState.status {
+        case .ready: return .green
+        case .downloading, .loading, .notLoaded: return .orange
+        case .error: return .red
+        }
+    }
+
+    private var statusTitle: String {
+        switch modelState.status {
+        case .ready: return "Qwen3-ASR 就绪"
+        case .downloading(let progress, _): return "下载中 \(Int(progress * 100))%"
+        case .loading: return "加载模型中..."
+        case .error: return "加载失败"
+        case .notLoaded: return "等待加载"
         }
     }
 }
@@ -150,7 +199,6 @@ struct ServiceConfigCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Header
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
@@ -161,7 +209,6 @@ struct ServiceConfigCard: View {
 
             Divider()
 
-            // Provider
             VStack(alignment: .leading, spacing: 6) {
                 Text("服务商")
                     .font(.system(size: 12, weight: .medium))
@@ -169,7 +216,6 @@ struct ServiceConfigCard: View {
                 ProviderPicker(provider: $provider, baseURL: $baseURL)
             }
 
-            // Base URL
             VStack(alignment: .leading, spacing: 6) {
                 Text("Base URL")
                     .font(.system(size: 12, weight: .medium))
@@ -187,10 +233,8 @@ struct ServiceConfigCard: View {
                     )
             }
 
-            // API Key
             SecureKeyField(title: "API Key", key: $apiKey)
 
-            // Model
             ModelIDField(title: "模型 ID", model: $model, placeholder: modelPlaceholder)
         }
         .padding(16)
@@ -203,93 +247,6 @@ struct ServiceConfigCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
         )
-    }
-}
-
-// MARK: - Local Model Status Card
-
-struct LocalModelStatusCard: View {
-    @StateObject private var manager = WhisperServerManager.shared
-    @State private var cachedModelSize: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: manager.serverStage.iconName)
-                    .font(.system(size: 16))
-                    .foregroundColor(manager.serverStage.statusColor)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(manager.serverStage.statusTitle)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(manager.serverStage.statusColor)
-                    Text(statusDetail)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                if manager.serverStage.canInstall {
-                    Button(action: { Task { await manager.install() } }) {
-                        Text("一键安装")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
-            }
-
-            if manager.serverStage == .modelLoading || manager.serverStage == .restarting {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .frame(height: 4)
-            }
-
-            if manager.serverStage.isInstalling || manager.serverStage == .error {
-                InstallProgressBanner(onRetry: { Task { await manager.retry() } })
-            }
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(manager.serverStage.statusColor.opacity(0.3), lineWidth: 1)
-        )
-        .onAppear {
-            cachedModelSize = WhisperSetupChecker.modelCacheSize()
-        }
-    }
-
-    private var statusDetail: String {
-        switch manager.serverStage {
-        case .ready:
-            if let size = cachedModelSize {
-                return "mlx-community/whisper-large-v3-turbo (\(size))"
-            }
-            return "mlx-community/whisper-large-v3-turbo"
-        case .modelLoading:
-            return "首次加载需要一些时间"
-        case .starting, .processStarted, .checking:
-            return "请稍候..."
-        case .restarting:
-            return manager.lastError ?? "正在自动恢复..."
-        case .installingVenv, .installingDeps, .downloadingModel:
-            return manager.installDetail ?? manager.serverStage.rawValue
-        case .needsInstall:
-            if WhisperSetupChecker.checkModelCache() {
-                return "模型已缓存，仅需安装 Python 依赖"
-            }
-            return "点击一键安装本地模型环境"
-        case .notStarted:
-            return "重启应用后自动检查"
-        case .error:
-            return manager.lastError ?? "未知错误"
-        }
     }
 }
 
@@ -327,29 +284,13 @@ struct SettingsView: View {
                         Spacer()
                     }
 
-                    Text("Flowtype 使用本地 MLX Whisper 模型进行语音识别，AppleSpeech 作为兜底方案。所有识别均在本地完成，无需联网。")
+                    Text("Flowtype 使用本地 Qwen3-ASR 模型进行语音识别，AppleSpeech 作为兜底方案。所有识别均在本地完成，无需联网。")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    // Local Model Status
-                    LocalModelStatusCard()
-
-                    // Model ID (read-only display)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("模型 ID")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text(store.current.whisperModel)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
+                    QwenModelStatusCard()
 
                     // Language selector
                     HStack {
@@ -357,21 +298,13 @@ struct SettingsView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
                         Spacer()
-                        Picker("", selection: $store.current.whisperLanguage) {
+                        Picker("", selection: $store.current.asrLanguage) {
                             ForEach(WhisperLanguage.allCases, id: \.self) { lang in
                                 Text(lang.displayName).tag(lang)
                             }
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 200)
-                        .onChange(of: store.current.whisperLanguage) { _, newLang in
-                            // Restart the Whisper server so the new language takes effect immediately.
-                            Task {
-                                WhisperServerManager.shared.stopServer()
-                                await WhisperServerManager.shared.checkAndStart()
-                                AppLogger.log("[Settings] Language changed to \(newLang.rawValue), server restarted")
-                            }
-                        }
                     }
                 }
                 .padding(.horizontal, 4)
@@ -582,7 +515,6 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 4)
 
-                // Bottom spacer
                 Spacer(minLength: 20)
             }
             .padding(24)
