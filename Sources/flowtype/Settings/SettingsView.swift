@@ -252,7 +252,7 @@ struct ServiceConfigCard: View {
 
 // MARK: - Settings View
 
-struct SettingsView: View {
+struct SettingsPage: View {
     @StateObject private var store = ConfigurationStore.shared
     @State private var showSaved = false
     @State private var hasAccessibility = false

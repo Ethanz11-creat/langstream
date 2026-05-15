@@ -35,10 +35,30 @@ actor LLMService {
 
     // MARK: - Public API
 
-    func polishText(_ text: String) -> AsyncThrowingStream<String, Error> {
-        let systemPrompt = self.config.systemPrompt
+    func polishText(_ text: String, systemPrompt: String? = nil) -> AsyncThrowingStream<String, Error> {
+        let prompt = systemPrompt ?? self.config.systemPrompt
         let maxTokens = self.config.maxTokens
-        return makeStream(text: text, systemPrompt: systemPrompt, maxTokens: maxTokens, timeoutSeconds: 30)
+        return makeStream(text: text, systemPrompt: prompt, maxTokens: maxTokens, timeoutSeconds: 30)
+    }
+
+    @MainActor
+    static func composeSystemPrompt(fallback: String) -> String {
+        let activePack = StylePackStore.shared.activePack
+        var prompt = activePack?.prompt ?? fallback
+
+        let phrases = DictionaryStore.shared.enabledPhrases
+        if !phrases.isEmpty {
+            let hotwordBlock = "\n\n以下是用户的专有名词词典，请在输出中优先使用这些正确写法：\n" + phrases.joined(separator: "、")
+            if prompt.contains("{{HOTWORDS}}") {
+                prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: hotwordBlock)
+            } else {
+                prompt += hotwordBlock
+            }
+        } else {
+            prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: "")
+        }
+
+        return prompt
     }
 
     // MARK: - Shared streaming infrastructure

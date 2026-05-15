@@ -6,17 +6,18 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
 
     convenience init() {
-        let settingsView = SettingsView()
-        let hostingView = NSHostingView(rootView: settingsView)
+        let mainView = MainWindowView()
+        let hostingView = NSHostingView(rootView: mainView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "FlowType 设置"
+        window.title = "FlowType"
         window.contentView = hostingView
+        window.contentMinSize = NSSize(width: 780, height: 520)
         window.center()
         window.isReleasedWhenClosed = false
 

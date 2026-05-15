@@ -60,8 +60,7 @@ class WindowManager: ObservableObject {
     var panel: FloatingPanel?
 
     private var eventTapPort: CFMachPort?
-    /// Local monitor for key events (Esc cancellation) while the panel is visible.
-    private var keyMonitor: Any?
+    private var sessionStateCancellable: AnyCancellable?
 
     /// Periodic timer to ensure the CGEvent tap stays enabled after system events.
     private var eventTapHealthTimer = CancellableTimer()
@@ -72,6 +71,10 @@ class WindowManager: ObservableObject {
 
     /// Cached trigger key for safe access from C callback (avoids actor isolation issues)
     private static var cachedTriggerKey = UnsafeCell<TriggerKey>(.command)
+
+    /// Cached flag: true when a session is active (non-idle). Updated by SessionController
+    /// observer so the C callback can check without crossing actor isolation.
+    private static var cachedSessionActive = UnsafeCell<Bool>(false)
 
     init() {
         let view = AnyView(
@@ -94,6 +97,14 @@ class WindowManager: ObservableObject {
                 self.handleSingleTap()
             }
         }
+
+        sessionStateCancellable = SessionController.shared.$sessionState
+            .receive(on: DispatchQueue.main)
+            .sink { state in
+                let active: Bool
+                if case .idle = state { active = false } else { active = true }
+                Self.cachedSessionActive.value = active
+            }
     }
 
     // MARK: - Hotkey Setup
@@ -151,6 +162,7 @@ class WindowManager: ObservableObject {
     private func setupCGEventTap() {
         AppLogger.log("[WindowManager] setupCGEventTap called")
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+                      | CGEventMask(1 << CGEventType.keyDown.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -176,8 +188,30 @@ class WindowManager: ObservableObject {
     }
 
     /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
-    /// Uses cachedTriggerKey to avoid actor isolation issues from C callback context.
+    /// Uses cachedTriggerKey / cachedSessionActive to avoid actor isolation issues from C callback context.
     private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let refcon = refcon {
+                let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()
+                if let tap = manager.eventTapPort {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+            }
+            return Unmanaged.passRetained(event)
+        }
+
+        if type == .keyDown {
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            if keyCode == 53, cachedSessionActive.value {
+                AppLogger.log("[EventTap] Esc pressed during active session — cancelling")
+                DispatchQueue.main.async {
+                    SessionController.shared.cancel()
+                }
+                return nil
+            }
+            return Unmanaged.passRetained(event)
+        }
+
         guard type == .flagsChanged else {
             return Unmanaged.passRetained(event)
         }
@@ -224,17 +258,8 @@ class WindowManager: ObservableObject {
         }
     }
 
-    @MainActor
-    private func handleEscapeKey() {
-        AppLogger.log("[WindowManager] Escape pressed — cancelling")
-        SessionController.shared.cancel()
-    }
-
     // MARK: - Window Management
 
-    /// Show the floating panel as a visual indicator only.
-    /// The panel is non-activating and cannot become key,
-    /// so it never steals focus from the user's active input field.
     func showWindow() {
         guard let panel = panel else { return }
         if let screen = NSScreen.main {
@@ -242,26 +267,11 @@ class WindowManager: ObservableObject {
             let y = screen.visibleFrame.minY + 40
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
-        // Use orderFront instead of makeKeyAndOrderFront because
-        // the panel cannot become key (canBecomeKey == false).
         panel.orderFront(nil)
-
-        // Install Esc key monitor for cancellation while the panel is visible.
-        if keyMonitor == nil {
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self = self, event.keyCode == 53 else { return event }
-                self.handleEscapeKey()
-                return nil // consume the event
-            }
-        }
     }
 
     func hide() {
         panel?.orderOut(nil)
-        if let monitor = keyMonitor {
-            NSEvent.removeMonitor(monitor)
-            keyMonitor = nil
-        }
     }
 
     func toggleWindow() {

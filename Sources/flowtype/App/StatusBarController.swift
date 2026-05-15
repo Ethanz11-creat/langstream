@@ -91,13 +91,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(asrStatusItem)
         menu.addItem(NSMenuItem.separator())
 
-        let showItem = NSMenuItem(title: "显示 Flowtype", action: #selector(showFlowtype), keyEquivalent: "")
+        let showItem = NSMenuItem(title: "显示 Flowtype", action: #selector(openSettings), keyEquivalent: ",")
         showItem.target = self
         menu.addItem(showItem)
-
-        let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -127,10 +123,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func showMenu() {
         guard let button = statusItem?.button else { return }
         statusItem?.menu?.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY), in: button)
-    }
-
-    @objc private func showFlowtype() {
-        WindowManager.shared.showWindow()
     }
 
     @objc private func openSettings() {

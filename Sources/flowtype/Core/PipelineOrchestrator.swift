@@ -58,6 +58,11 @@ final class SessionController: ObservableObject {
 
     private var hasInjected: Bool = false
 
+    // MARK: - History Tracking
+
+    private var sessionRawTranscript: String = ""
+    private var sessionFinalText: String = ""
+
     // MARK: - Error Dismiss
 
     private var errorDismissTask: Task<Void, Never>?
@@ -99,6 +104,8 @@ final class SessionController: ObservableObject {
         useLLMPolish = false
         hasInjected = false
         recordingStartTime = Date()
+        sessionRawTranscript = ""
+        sessionFinalText = ""
 
         previewText = ""
         amplitude = 0.0
@@ -281,13 +288,19 @@ final class SessionController: ObservableObject {
             return
         }
 
+        sessionRawTranscript = textToUse
+
         if useLLMPolish {
             let polishStart = Date()
             sessionState = .polishing(preview: "")
 
+            let composedPrompt = LLMService.composeSystemPrompt(
+                fallback: ConfigurationStore.shared.current.systemPrompt
+            )
+
             var polishedText: String? = nil
             do {
-                let stream = await llmService.polishText(textToUse)
+                let stream = await llmService.polishText(textToUse, systemPrompt: composedPrompt)
                 var accumulated = ""
                 for try await chunk in stream {
                     guard activeSessionID == id else { throw CancellationError() }
@@ -347,6 +360,8 @@ final class SessionController: ObservableObject {
             showError("已复制到剪贴板")
             return
         }
+
+        saveHistory(finalText: text)
 
         resetToIdle()
         if let recStart = recordingStartTime {
@@ -415,6 +430,30 @@ final class SessionController: ObservableObject {
                 self.resetToIdle()
             }
         }
+    }
+
+    // MARK: - History
+
+    private func saveHistory(finalText: String) {
+        let durationMs: UInt64?
+        if let recStart = recordingStartTime {
+            durationMs = UInt64(Date().timeIntervalSince(recStart) * 1000)
+        } else {
+            durationMs = nil
+        }
+        let mode: PolishMode = useLLMPolish ? (StylePackStore.shared.activePack?.baseMode ?? .structured) : .raw
+        let session = DictationSession(
+            rawTranscript: sessionRawTranscript,
+            finalText: finalText,
+            polishMode: mode,
+            durationMs: durationMs
+        )
+        HistoryStore.shared.append(session)
+
+        let hitIds = DictionaryStore.shared.detectHits(in: finalText)
+        DictionaryStore.shared.incrementHits(ids: hitIds)
+
+        AppLogger.log("[SessionController] History saved, dict hits: \(hitIds.count)")
     }
 
     // MARK: - Reset
