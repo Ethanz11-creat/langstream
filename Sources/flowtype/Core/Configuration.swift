@@ -74,12 +74,21 @@ struct Configuration: Codable, Equatable {
     var whisperModel: String = "mlx-community/whisper-large-v3-turbo"
     var whisperLanguage: WhisperLanguage = .zh
 
-    // Audio slicing parameters (for parallel ASR pipeline)
-    var sliceMaxDuration: Double = 15.0
-    var sliceMinDuration: Double = 3.0
-    var sliceSilenceThresholdDB: Float = -40.0
-    var sliceSilenceDuration: Double = 0.5
-    var sliceOverlapDuration: Double = 1.0
+    // Streaming segment formation (VAD-driven adaptive pipeline)
+    var segmentMinDuration: Double = 3.0
+    var segmentMaxDuration: Double = 30.0
+    var segmentOverlapDuration: Double = 1.0
+    var vadSilenceThresholdMs: Int = 800
+    var vadRequestTimeoutMs: Int = 500
+    var vadMaxFailures: Int = 3
+
+    // Amplitude fallback (when VAD unavailable)
+    var amplitudeSilenceThresholdDB: Float = -40.0
+    var amplitudeSilenceDuration: Double = 0.5
+
+    // Experimental cross-segment context (V1: both false)
+    var experimentalContextEnabled: Bool = false
+    var experimentalConditionEnabled: Bool = false
 
     // LLM
     var llmProvider: String = "SiliconFlow"
@@ -156,11 +165,16 @@ struct Configuration: Codable, Equatable {
         let d = Configuration.default
         whisperModel = (try? c.decode(String.self, forKey: .whisperModel)) ?? d.whisperModel
         whisperLanguage = (try? c.decode(WhisperLanguage.self, forKey: .whisperLanguage)) ?? d.whisperLanguage
-        sliceMaxDuration = (try? c.decode(Double.self, forKey: .sliceMaxDuration)) ?? d.sliceMaxDuration
-        sliceMinDuration = (try? c.decode(Double.self, forKey: .sliceMinDuration)) ?? d.sliceMinDuration
-        sliceSilenceThresholdDB = (try? c.decode(Float.self, forKey: .sliceSilenceThresholdDB)) ?? d.sliceSilenceThresholdDB
-        sliceSilenceDuration = (try? c.decode(Double.self, forKey: .sliceSilenceDuration)) ?? d.sliceSilenceDuration
-        sliceOverlapDuration = (try? c.decode(Double.self, forKey: .sliceOverlapDuration)) ?? d.sliceOverlapDuration
+        segmentMinDuration = (try? c.decode(Double.self, forKey: .segmentMinDuration)) ?? d.segmentMinDuration
+        segmentMaxDuration = (try? c.decode(Double.self, forKey: .segmentMaxDuration)) ?? d.segmentMaxDuration
+        segmentOverlapDuration = (try? c.decode(Double.self, forKey: .segmentOverlapDuration)) ?? d.segmentOverlapDuration
+        vadSilenceThresholdMs = (try? c.decode(Int.self, forKey: .vadSilenceThresholdMs)) ?? d.vadSilenceThresholdMs
+        vadRequestTimeoutMs = (try? c.decode(Int.self, forKey: .vadRequestTimeoutMs)) ?? d.vadRequestTimeoutMs
+        vadMaxFailures = (try? c.decode(Int.self, forKey: .vadMaxFailures)) ?? d.vadMaxFailures
+        amplitudeSilenceThresholdDB = (try? c.decode(Float.self, forKey: .amplitudeSilenceThresholdDB)) ?? d.amplitudeSilenceThresholdDB
+        amplitudeSilenceDuration = (try? c.decode(Double.self, forKey: .amplitudeSilenceDuration)) ?? d.amplitudeSilenceDuration
+        experimentalContextEnabled = (try? c.decode(Bool.self, forKey: .experimentalContextEnabled)) ?? d.experimentalContextEnabled
+        experimentalConditionEnabled = (try? c.decode(Bool.self, forKey: .experimentalConditionEnabled)) ?? d.experimentalConditionEnabled
         llmProvider = (try? c.decode(String.self, forKey: .llmProvider)) ?? d.llmProvider
         llmBaseURL = (try? c.decode(String.self, forKey: .llmBaseURL)) ?? d.llmBaseURL
         llmApiKey = (try? c.decode(String.self, forKey: .llmApiKey)) ?? d.llmApiKey
