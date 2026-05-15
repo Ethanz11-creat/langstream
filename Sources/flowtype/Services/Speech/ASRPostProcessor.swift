@@ -19,6 +19,7 @@ struct ASRPostProcessor {
         var result = text
         result = processor.normalizeWhitespace(result)
         result = processor.stripFillers(result)
+        result = processor.stripRepetitions(result)
         result = processor.correctTechTerms(result)
         result = processor.fixCommonASRErrors(result)
         result = processor.convertPunctuationForChinese(result)
@@ -37,6 +38,48 @@ struct ASRPostProcessor {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Collapse consecutive repeated substrings (2-6 chars, 3+ repeats → 1).
+    /// Catches Whisper decoder-loop hallucinations like "回头回头回头回头..."
+    func stripRepetitions(_ text: String, maxRepeat: Int = 3) -> String {
+        var result = text
+        guard result.count >= 6 else { return result }
+
+        for patLen in 2...6 {
+            let chars = Array(result)
+            var out: [Character] = []
+            var i = 0
+            while i < chars.count {
+                if i + patLen <= chars.count {
+                    let pat = chars[i..<(i + patLen)]
+                    var count = 1
+                    var j = i + patLen
+                    while j + patLen <= chars.count {
+                        let candidate = chars[j..<(j + patLen)]
+                        if candidate.elementsEqual(pat) {
+                            count += 1
+                            j += patLen
+                        } else {
+                            break
+                        }
+                    }
+                    if count >= maxRepeat {
+                        out.append(contentsOf: pat)
+                        i = j
+                        continue
+                    }
+                }
+                out.append(chars[i])
+                i += 1
+            }
+            let newResult = String(out)
+            if newResult.count < result.count {
+                AppLogger.log("[ASRPostProcessor] Stripped repetitions (\(patLen)-char): \(result.count) -> \(newResult.count) chars")
+                result = newResult
+            }
+        }
+        return result
     }
 
     /// Conservative filler removal. Only removes fillers that appear as
