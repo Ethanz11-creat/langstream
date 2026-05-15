@@ -39,6 +39,10 @@ final class StreamingSegmentFormer: @unchecked Sendable {
 
     // MARK: - State
 
+    /// Serial queue protecting all mutable state from concurrent access
+    /// (audio tap thread vs. VAD response task).
+    private let stateQueue = DispatchQueue(label: "flowtype.segment-former")
+
     private let sampleRate: Double = 16000
     private var segmentIndex: Int = 0
     private var segmentBuffer: [Float] = []
@@ -91,24 +95,28 @@ final class StreamingSegmentFormer: @unchecked Sendable {
     }
 
     func appendBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard isCollecting else { return }
         guard let data = buffer.floatChannelData?[0] else { return }
         let count = Int(buffer.frameLength)
         let frames = Array(UnsafeBufferPointer(start: data, count: count))
-        appendFrames(frames)
+        stateQueue.sync {
+            guard isCollecting else { return }
+            appendFrames(frames)
+        }
     }
 
     func finish() {
-        guard isCollecting else { return }
-        isCollecting = false
+        stateQueue.sync {
+            guard isCollecting else { return }
+            isCollecting = false
 
-        // Emit whatever remains — user's last words, never discard
-        if !segmentBuffer.isEmpty {
-            emitSegment(cutReason: .sessionEnded)
+            // Emit whatever remains — user's last words, never discard
+            if !segmentBuffer.isEmpty {
+                emitSegment(cutReason: .sessionEnded)
+            }
+
+            segmentContinuation?.finish()
+            segmentContinuation = nil
         }
-
-        segmentContinuation?.finish()
-        segmentContinuation = nil
     }
 
     // MARK: - Frame Processing
@@ -148,17 +156,22 @@ final class StreamingSegmentFormer: @unchecked Sendable {
 
         Task.detached { [weak self] in
             guard let self else { return }
-            defer { self.vadRequestInFlight = false }
 
             do {
                 let response = try await self.postVad(wavData: wavData, timeoutMs: timeoutMs)
-                self.vadFailureCount = 0
-                self.handleVadResponse(response)
+                self.stateQueue.sync {
+                    self.vadRequestInFlight = false
+                    self.vadFailureCount = 0
+                    self.handleVadResponse(response)
+                }
             } catch {
-                self.vadFailureCount += 1
-                if self.vadFailureCount >= self.vadMaxFailures && !self.vadDegraded {
-                    self.vadDegraded = true
-                    AppLogger.log("[SegmentFormer] VAD degraded after \(self.vadMaxFailures) failures, falling back to amplitude mode")
+                self.stateQueue.sync {
+                    self.vadRequestInFlight = false
+                    self.vadFailureCount += 1
+                    if self.vadFailureCount >= self.vadMaxFailures && !self.vadDegraded {
+                        self.vadDegraded = true
+                        AppLogger.log("[SegmentFormer] VAD degraded after \(self.vadMaxFailures) failures, falling back to amplitude mode")
+                    }
                 }
             }
         }

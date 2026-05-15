@@ -1,5 +1,4 @@
 import Foundation
-import AVFoundation
 
 final class SpeechRouter: @unchecked Sendable {
     let primaryProvider: MLXWhisperProvider

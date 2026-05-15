@@ -457,6 +457,12 @@ final class SessionController: ObservableObject {
         previewText = ""
         amplitude = 0.0
         pendingPreviewText = ""
+        recordingTask?.cancel()
+        recordingTask = nil
+        processingTask?.cancel()
+        processingTask = nil
+        streamingTask?.cancel()
+        streamingTask = nil
         previewDebounceTask?.cancel()
         previewDebounceTask = nil
         previewStreamTask?.cancel()
