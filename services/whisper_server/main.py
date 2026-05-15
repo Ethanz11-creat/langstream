@@ -105,6 +105,7 @@ async def health():
             "language": _args.language,
             "progress": None,
             "error": _model_error,
+            "vad_ready": _vad_ready,
         }
     )
 
@@ -264,7 +265,11 @@ def _strip_repetitions(text: str, max_repeat: int = 3) -> str:
 
 
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(
+    file: UploadFile = File(...),
+    initial_prompt: Optional[str] = None,
+    condition_on_previous: Optional[bool] = None,
+):
     if not _model_loaded:
         return JSONResponse(
             status_code=503,
@@ -288,6 +293,10 @@ async def transcribe(file: UploadFile = File(...)):
 
         print(f"[whisper] Audio array: {len(audio)} samples, {len(audio)/16000:.2f}s", flush=True)
 
+        # Build transcribe kwargs
+        use_condition = bool(condition_on_previous) if condition_on_previous is not None else False
+        prompt = initial_prompt if initial_prompt else None
+
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             executor,
@@ -296,7 +305,8 @@ async def transcribe(file: UploadFile = File(...)):
                 path_or_hf_repo=_args.model,
                 language=_args.language if _args.language != "auto" else None,
                 verbose=False,
-                condition_on_previous_text=False,
+                initial_prompt=prompt,
+                condition_on_previous_text=use_condition,
                 hallucination_silence_threshold=2.0,
             ),
         )
@@ -304,44 +314,77 @@ async def transcribe(file: UploadFile = File(...)):
         # Extract text and segments
         if hasattr(result, 'get'):
             raw_text = result.get("text", "").strip()
-            segments = result.get("segments", [])
+            raw_segments = result.get("segments", [])
         else:
             raw_text = getattr(result, 'text', str(result)).strip()
-            segments = []
+            raw_segments = []
 
-        # Filter hallucinated segments by compression ratio
-        if segments:
-            good_segs = []
-            for seg in segments:
-                if not hasattr(seg, 'get'):
-                    good_segs.append(seg)
-                    continue
-                cr = seg.get("compression_ratio", 0)
-                nsp = seg.get("no_speech_prob", 0)
-                seg_text = seg.get("text", "")
-                if cr > 2.4 or nsp > 0.6:
-                    print(f"[whisper] Filtered segment (cr={cr:.1f}, nsp={nsp:.2f}): {seg_text[:40]}", flush=True)
-                    continue
-                good_segs.append(seg)
-            if len(good_segs) == len(segments):
-                text = raw_text
-            else:
-                text = " ".join(
-                    (s.get("text", "") if hasattr(s, 'get') else str(s)).strip()
-                    for s in good_segs
-                ).strip()
-                print(f"[whisper] Segment filter: {len(segments)} -> {len(good_segs)} segments", flush=True)
+        detected_lang = None
+        if hasattr(result, 'get'):
+            detected_lang = result.get("language", None)
+
+        # Build response segments with filtered/filter_reason
+        response_segments = []
+        good_texts = []
+        for seg in raw_segments:
+            if not hasattr(seg, 'get'):
+                response_segments.append({
+                    "text": str(seg),
+                    "start": 0.0, "end": 0.0,
+                    "no_speech_prob": 0.0, "compression_ratio": 0.0,
+                    "filtered": False, "filter_reason": None,
+                })
+                good_texts.append(str(seg).strip())
+                continue
+
+            seg_text = seg.get("text", "")
+            cr = seg.get("compression_ratio", 0)
+            nsp = seg.get("no_speech_prob", 0)
+
+            filtered = False
+            filter_reason = None
+            if cr > 2.4:
+                filtered = True
+                filter_reason = "compression_ratio_exceeded"
+                print(f"[whisper] Filtered segment (cr={cr:.1f}): {seg_text[:40]}", flush=True)
+            elif nsp > 0.6:
+                filtered = True
+                filter_reason = "no_speech_high"
+                print(f"[whisper] Filtered segment (nsp={nsp:.2f}): {seg_text[:40]}", flush=True)
+
+            response_segments.append({
+                "text": seg_text,
+                "start": round(seg.get("start", 0.0), 3),
+                "end": round(seg.get("end", 0.0), 3),
+                "no_speech_prob": round(nsp, 3),
+                "compression_ratio": round(cr, 2),
+                "filtered": filtered,
+                "filter_reason": filter_reason,
+            })
+
+            if not filtered:
+                good_texts.append(seg_text.strip())
+
+        # Build final text from non-filtered segments
+        if response_segments:
+            text = " ".join(good_texts).strip()
+            if len(good_texts) < len(response_segments):
+                print(f"[whisper] Segment filter: {len(response_segments)} -> {len(good_texts)} segments", flush=True)
         else:
             text = raw_text
 
-        # Detect repetitive hallucination patterns in final text
-        text = _strip_repetitions(text)
-
-        print(f"[whisper] segments={len(segments)}, text_len={len(text)}", flush=True)
+        # Server-side repetition stripping
+        stripped = _strip_repetitions(text)
+        if stripped != text:
+            text = stripped
 
         duration = time.time() - start_time
         print(f"[whisper] Transcribed in {duration:.2f}s: {text[:80]}...", flush=True)
-        return JSONResponse(content={"text": text})
+        return JSONResponse(content={
+            "text": text,
+            "segments": response_segments,
+            "language": detected_lang or _args.language,
+        })
     except Exception as e:
         print(f"[whisper] Transcription failed: {e}", flush=True, file=sys.stderr)
         import traceback

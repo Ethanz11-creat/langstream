@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
+import torch
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -28,6 +29,9 @@ _model_loading = False
 _model_error: Optional[str] = None
 _server_port: int = 0
 _args: argparse.Namespace
+_vad_model = None
+_vad_ready = False
+_previous_speech_ratio: float = 0.0
 
 app = FastAPI(title="Flowtype Whisper Server")
 executor = ThreadPoolExecutor(max_workers=1)
@@ -47,6 +51,7 @@ def _load_model_sync():
             path_or_hf_repo=_args.model,
             language=_args.language if _args.language != "auto" else None,
             verbose=False,
+            condition_on_previous_text=False,
         )
         print("[whisper] Model loaded successfully", flush=True)
         _model_loaded = True
@@ -55,6 +60,22 @@ def _load_model_sync():
         _model_error = str(e)
     finally:
         _model_loading = False
+
+
+def _load_vad_sync():
+    """Load Silero VAD model (CPU only, ~2MB, ~1s)."""
+    global _vad_model, _vad_ready
+    try:
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True,
+        )
+        _vad_model = model
+        _vad_ready = True
+        print("[vad] Silero VAD model loaded", flush=True)
+    except Exception as e:
+        print(f"[vad] Failed to load VAD model: {e}", flush=True, file=sys.stderr)
 
 
 async def _background_load_model():
@@ -66,6 +87,10 @@ async def _background_load_model():
 
 @app.on_event("startup")
 async def startup():
+    loop = asyncio.get_event_loop()
+    # Load VAD synchronously first (fast, ~1s)
+    await loop.run_in_executor(None, _load_vad_sync)
+    # Then start Whisper loading in background
     asyncio.create_task(_background_load_model())
 
 
@@ -80,8 +105,86 @@ async def health():
             "language": _args.language,
             "progress": None,
             "error": _model_error,
+            "vad_ready": _vad_ready,
         }
     )
+
+
+@app.post("/vad")
+async def vad(file: UploadFile = File(...)):
+    global _previous_speech_ratio
+
+    if not _vad_ready or _vad_model is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "VAD model not loaded"},
+        )
+
+    try:
+        content = await file.read()
+        audio = _load_audio_from_bytes(content)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid audio: {e}"},
+        )
+
+    try:
+        audio_tensor = torch.from_numpy(audio)
+        # Get speech timestamps from Silero VAD
+        speech_timestamps = _vad_model.get_speech_timestamps(
+            audio_tensor, sampling_rate=16000,
+            threshold=0.5,
+            min_speech_duration_ms=100,
+            min_silence_duration_ms=100,
+        )
+
+        sample_count = len(audio)
+        duration_ms = sample_count / 16000 * 1000
+
+        # Build speeches list
+        speeches = []
+        for ts in speech_timestamps:
+            speeches.append({
+                "start": round(ts["start"] / 16000, 3),
+                "end": round(ts["end"] / 16000, 3),
+            })
+
+        # Compute has_speech and speech_ratio
+        speech_samples = sum(ts["end"] - ts["start"] for ts in speech_timestamps)
+        speech_ratio = round(speech_samples / sample_count, 3) if sample_count > 0 else 0.0
+        has_speech = len(speech_timestamps) > 0
+
+        # Compute trailing_silence_ms
+        if speech_timestamps:
+            last_speech_end = speech_timestamps[-1]["end"]
+            trailing_silence_samples = sample_count - last_speech_end
+            trailing_silence_ms = int(trailing_silence_samples / 16000 * 1000)
+        else:
+            trailing_silence_ms = int(duration_ms)
+
+        # Compute suggest_cut
+        suggest_cut = False
+        if trailing_silence_ms >= 500 and speech_ratio < 0.3:
+            suggest_cut = True
+        elif _previous_speech_ratio > 0.8 and speech_ratio < 0.2:
+            suggest_cut = True
+
+        _previous_speech_ratio = speech_ratio
+
+        return JSONResponse(content={
+            "has_speech": has_speech,
+            "speech_ratio": speech_ratio,
+            "trailing_silence_ms": trailing_silence_ms,
+            "suggest_cut": suggest_cut,
+            "speeches": speeches,
+        })
+    except Exception as e:
+        print(f"[vad] VAD inference failed: {e}", flush=True, file=sys.stderr)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
 
 
 def _load_audio_from_bytes(content: bytes) -> np.ndarray:
@@ -126,8 +229,47 @@ def _load_audio_from_bytes(content: bytes) -> np.ndarray:
     return audio
 
 
+def _strip_repetitions(text: str, max_repeat: int = 3) -> str:
+    """Detect and collapse consecutive repeated substrings (2-6 chars).
+
+    Classic Whisper decoder-loop hallucination produces patterns like
+    '回头回头回头...' (dozens of times). This catches them and collapses
+    to a single occurrence.
+    """
+    if not text:
+        return text
+    original = text
+    for pat_len in range(2, 7):
+        out = []
+        i = 0
+        while i < len(text):
+            if i + pat_len <= len(text):
+                pat = text[i:i + pat_len]
+                count = 1
+                j = i + pat_len
+                while j + pat_len <= len(text) and text[j:j + pat_len] == pat:
+                    count += 1
+                    j += pat_len
+                if count >= max_repeat:
+                    out.append(pat)
+                    i = j
+                    continue
+            out.append(text[i])
+            i += 1
+        new_text = "".join(out)
+        if len(new_text) < len(text):
+            text = new_text
+    if text != original:
+        print(f"[whisper] Stripped repetitions: {len(original)} -> {len(text)} chars", flush=True)
+    return text
+
+
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(
+    file: UploadFile = File(...),
+    initial_prompt: Optional[str] = None,
+    condition_on_previous: Optional[bool] = None,
+):
     if not _model_loaded:
         return JSONResponse(
             status_code=503,
@@ -151,6 +293,10 @@ async def transcribe(file: UploadFile = File(...)):
 
         print(f"[whisper] Audio array: {len(audio)} samples, {len(audio)/16000:.2f}s", flush=True)
 
+        # Build transcribe kwargs
+        use_condition = bool(condition_on_previous) if condition_on_previous is not None else False
+        prompt = initial_prompt if initial_prompt else None
+
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             executor,
@@ -159,34 +305,86 @@ async def transcribe(file: UploadFile = File(...)):
                 path_or_hf_repo=_args.model,
                 language=_args.language if _args.language != "auto" else None,
                 verbose=False,
+                initial_prompt=prompt,
+                condition_on_previous_text=use_condition,
+                hallucination_silence_threshold=2.0,
             ),
         )
 
-        # Debug: log full result structure
-        result_type = type(result).__name__
+        # Extract text and segments
         if hasattr(result, 'get'):
-            text = result.get("text", "").strip()
-            segments = result.get("segments", [])
-            print(f"[whisper] Result type={result_type}, segments={len(segments)}, text_len={len(text)}", flush=True)
-            if segments:
-                for i, seg in enumerate(segments[:5]):
-                    seg_text = seg.get("text", "") if hasattr(seg, 'get') else str(seg)
-                    print(f"[whisper]   seg[{i}]: {seg_text[:60]}", flush=True)
-            # Fallback: build text from segments if top-level text is empty or suspiciously short
-            if not text and segments:
-                text = " ".join(
-                    (seg.get("text", "") if hasattr(seg, 'get') else str(seg)).strip()
-                    for seg in segments
-                ).strip()
-                print(f"[whisper] Rebuilt text from segments: {text[:80]}", flush=True)
+            raw_text = result.get("text", "").strip()
+            raw_segments = result.get("segments", [])
         else:
-            # Result might be a dataclass or namedtuple
-            text = getattr(result, 'text', str(result)).strip()
-            print(f"[whisper] Result type={result_type}, text={text[:80]}", flush=True)
+            raw_text = getattr(result, 'text', str(result)).strip()
+            raw_segments = []
+
+        detected_lang = None
+        if hasattr(result, 'get'):
+            detected_lang = result.get("language", None)
+
+        # Build response segments with filtered/filter_reason
+        response_segments = []
+        good_texts = []
+        for seg in raw_segments:
+            if not hasattr(seg, 'get'):
+                response_segments.append({
+                    "text": str(seg),
+                    "start": 0.0, "end": 0.0,
+                    "no_speech_prob": 0.0, "compression_ratio": 0.0,
+                    "filtered": False, "filter_reason": None,
+                })
+                good_texts.append(str(seg).strip())
+                continue
+
+            seg_text = seg.get("text", "")
+            cr = seg.get("compression_ratio", 0)
+            nsp = seg.get("no_speech_prob", 0)
+
+            filtered = False
+            filter_reason = None
+            if cr > 2.4:
+                filtered = True
+                filter_reason = "compression_ratio_exceeded"
+                print(f"[whisper] Filtered segment (cr={cr:.1f}): {seg_text[:40]}", flush=True)
+            elif nsp > 0.6:
+                filtered = True
+                filter_reason = "no_speech_high"
+                print(f"[whisper] Filtered segment (nsp={nsp:.2f}): {seg_text[:40]}", flush=True)
+
+            response_segments.append({
+                "text": seg_text,
+                "start": round(seg.get("start", 0.0), 3),
+                "end": round(seg.get("end", 0.0), 3),
+                "no_speech_prob": round(nsp, 3),
+                "compression_ratio": round(cr, 2),
+                "filtered": filtered,
+                "filter_reason": filter_reason,
+            })
+
+            if not filtered:
+                good_texts.append(seg_text.strip())
+
+        # Build final text from non-filtered segments
+        if response_segments:
+            text = " ".join(good_texts).strip()
+            if len(good_texts) < len(response_segments):
+                print(f"[whisper] Segment filter: {len(response_segments)} -> {len(good_texts)} segments", flush=True)
+        else:
+            text = raw_text
+
+        # Server-side repetition stripping
+        stripped = _strip_repetitions(text)
+        if stripped != text:
+            text = stripped
 
         duration = time.time() - start_time
         print(f"[whisper] Transcribed in {duration:.2f}s: {text[:80]}...", flush=True)
-        return JSONResponse(content={"text": text})
+        return JSONResponse(content={
+            "text": text,
+            "segments": response_segments,
+            "language": detected_lang or _args.language,
+        })
     except Exception as e:
         print(f"[whisper] Transcription failed: {e}", flush=True, file=sys.stderr)
         import traceback
