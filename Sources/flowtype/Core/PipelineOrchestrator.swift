@@ -43,10 +43,10 @@ final class SessionController: ObservableObject {
     private var streamingTask: Task<Void, Never>?
     private var previewStreamTask: Task<Void, Never>?
 
-    // MARK: - Audio Slicing
+    // MARK: - Pipeline Components (per-session)
 
-    private var collectedSlices: [AudioSlice] = []
-    private var streamingResults: [Int: String] = [:]
+    private var pipeline: TranscriptionPipeline?
+    private var accumulator: StableTextAccumulator?
 
     // MARK: - Recording Timer
 
@@ -102,10 +102,12 @@ final class SessionController: ObservableObject {
         activeSessionID = newID
         useLLMPolish = false
         hasInjected = false
-        collectedSlices.removeAll()
-        streamingResults.removeAll()
-        streamingTask = nil
         recordingStartTime = Date()
+
+        // Create per-session pipeline components
+        pipeline = TranscriptionPipeline()
+        accumulator = StableTextAccumulator()
+        pipeline?.accumulator = accumulator
 
         previewText = ""
         amplitude = 0.0
@@ -156,10 +158,11 @@ final class SessionController: ObservableObject {
         streamingTask = nil
         previewStreamTask?.cancel()
         previewStreamTask = nil
+        pipeline?.cancel()
 
         audioRecorder.onAudioBuffer = nil
         audioRecorder.onRecordingFrozen = nil
-        _ = audioRecorder.stopRecording()
+        audioRecorder.stopRecording()
         _ = appleSpeechProvider.stopStreamingRecognition()
 
         resetToIdle()
@@ -191,6 +194,7 @@ final class SessionController: ObservableObject {
             let output = try await audioRecorder.startRecording()
             AppLogger.log("[SessionController#\(id)] AudioRecorder started")
 
+            // AppleSpeech preview
             audioRecorder.onAudioBuffer = { [weak self] buffer in
                 self?.appleSpeechProvider.appendAudioBuffer(buffer)
             }
@@ -205,12 +209,26 @@ final class SessionController: ObservableObject {
                 }
             }
 
+            // Streaming transcription pipeline
+            guard let pipeline = self.pipeline, let accumulator = self.accumulator else { return }
+
+            let resultStream = pipeline.start(
+                segments: output.segments,
+                provider: speechRouter.primaryProvider,
+                fallback: speechRouter.fallbackProvider
+            )
+
             self.streamingTask = Task { [weak self] in
                 guard let self else { return }
-                await self.runStreamingTranscription(id: id, sliceStream: output.slices)
+                for await result in resultStream {
+                    guard self.activeSessionID == id else { break }
+                    let _ = accumulator.accept(result)
+                    // Bridge queue depth to segment former for pressure adaptation
+                    self.audioRecorder.updateQueueDepth(pipeline.pendingDepth)
+                }
             }
 
-            AppLogger.log("[SessionController#\(id)] Waiting for audio stream...")
+            AppLogger.log("[SessionController#\(id)] Streaming pipeline started")
             for await amp in output.amplitude {
                 try checkCancellation(id: id)
                 if abs(self.amplitude - amp) > 0.005 {
@@ -224,59 +242,6 @@ final class SessionController: ObservableObject {
         } catch {
             AppLogger.log("[SessionController#\(id)] Recording failed: \(error)")
             showError("录音启动失败: \(error.localizedDescription)")
-        }
-    }
-
-    // MARK: - Streaming Transcription Phase
-
-    private func runStreamingTranscription(id: UInt64, sliceStream: AsyncStream<AudioSlice>) async {
-        AppLogger.log("[SessionController#\(id)] Streaming transcription started")
-        let startTime = Date()
-        defer {
-            let elapsed = Date().timeIntervalSince(startTime)
-            AppLogger.log("[SessionController#\(id)] Streaming transcription ended in \(String(format: "%.1f", elapsed))s")
-        }
-
-        let provider = speechRouter.primaryProvider
-        let maxWorkers = 2
-
-        await withTaskGroup(of: (index: Int, text: String?).self) { group in
-            var iterator = sliceStream.makeAsyncIterator()
-            var activeCount = 0
-            var streamEnded = false
-
-            repeat {
-                while activeCount < maxWorkers && !streamEnded {
-                    if let slice = await iterator.next() {
-                        guard self.activeSessionID == id else { break }
-
-                        self.collectedSlices.append(slice)
-
-                        group.addTask { [provider] in
-                            do {
-                                let text = try await provider.transcribe(audioData: slice.audioData, timeout: 300)
-                                return (slice.index, text)
-                            } catch {
-                                AppLogger.log("[SessionController#\(id)] Slice #\(slice.index) failed: \(error)")
-                                return (slice.index, nil)
-                            }
-                        }
-                        activeCount += 1
-                    } else {
-                        streamEnded = true
-                        break
-                    }
-                }
-
-                if activeCount > 0 {
-                    if let completed = await group.next() {
-                        activeCount -= 1
-                        if let text = completed.text {
-                            self.streamingResults[completed.index] = text
-                        }
-                    }
-                }
-            } while activeCount > 0 || !streamEnded
         }
     }
 
@@ -297,8 +262,9 @@ final class SessionController: ObservableObject {
             AppLogger.log("[SessionController#\(id)] Processing phase ended (total: \(String(format: "%.1f", totalProcessingTime))s)")
         }
 
+        // Stop recording — triggers segmentFormer.finish() which emits final segment
         let stopAudioStart = Date()
-        _ = audioRecorder.stopRecording()
+        audioRecorder.stopRecording()
         audioRecorder.onAudioBuffer = nil
         audioRecorder.onRecordingFrozen = nil
         AppLogger.log("[SessionController#\(id)] AudioRecorder stopped in \(String(format: "%.2f", Date().timeIntervalSince(stopAudioStart)))s")
@@ -306,37 +272,27 @@ final class SessionController: ObservableObject {
         let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
         AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: '\(localPreviewText.prefix(80))'")
 
+        // Wait for streaming pipeline to finish
         let waitStreamStart = Date()
         let streamCompleted = await withTaskGroup(of: Bool.self) { group in
             group.addTask { await self.streamingTask?.value; return true }
-            group.addTask { try? await Task.sleep(nanoseconds: 30_000_000_000); return false }
+            group.addTask { try? await Task.sleep(nanoseconds: 15_000_000_000); return false }
             let first = await group.next()!
             group.cancelAll()
             return first
         }
         if !streamCompleted {
-            AppLogger.log("[SessionController#\(id)] Streaming transcription timed out after 30s")
+            AppLogger.log("[SessionController#\(id)] Streaming pipeline timed out after 15s")
             streamingTask?.cancel()
+            pipeline?.cancel()
         }
         streamingTask = nil
-        AppLogger.log("[SessionController#\(id)] Waited for streaming in \(String(format: "%.2f", Date().timeIntervalSince(waitStreamStart)))s, results: \(streamingResults.count)/\(collectedSlices.count) slices")
+        AppLogger.log("[SessionController#\(id)] Waited for streaming in \(String(format: "%.2f", Date().timeIntervalSince(waitStreamStart)))s")
 
+        // Finalize accumulator — freeze pending tail
         let mergeStart = Date()
-        let maxIndex = collectedSlices.map(\.index).max() ?? 0
-        var allTexts = orderedTexts(from: streamingResults, maxIndex: maxIndex)
-
-        var finalASRText = allTexts.joined(separator: " ")
-        AppLogger.log("[SessionController#\(id)] Merged ASR text (streaming): '\(finalASRText.prefix(80))' (merge took \(String(format: "%.2f", Date().timeIntervalSince(mergeStart)))s)")
-
-        if finalASRText.isEmpty, !collectedSlices.isEmpty {
-            AppLogger.log("[SessionController#\(id)] Streaming produced nothing, falling back to batch transcription")
-            let fallbackStart = Date()
-            let transcriber = ParallelTranscriber(provider: speechRouter.primaryProvider, maxWorkers: 2)
-            let results = await transcriber.transcribe(slices: collectedSlices, timeout: 300)
-            allTexts += orderedTexts(from: results, maxIndex: maxIndex)
-            finalASRText = allTexts.joined(separator: " ")
-            AppLogger.log("[SessionController#\(id)] Fallback ASR result: '\(finalASRText.prefix(80))' (took \(String(format: "%.1f", Date().timeIntervalSince(fallbackStart)))s)")
-        }
+        var finalASRText = accumulator?.finalize() ?? ""
+        AppLogger.log("[SessionController#\(id)] Accumulator finalized: \(finalASRText.count) chars (merge took \(String(format: "%.2f", Date().timeIntervalSince(mergeStart)))s)")
 
         if finalASRText.isEmpty, !localPreviewText.isEmpty {
             AppLogger.log("[SessionController#\(id)] Using AppleSpeech preview as fallback")
@@ -346,7 +302,7 @@ final class SessionController: ObservableObject {
         let postProcessStart = Date()
         let processedText = ASRPostProcessor.process(finalASRText)
         let textToUse = processedText.isEmpty ? finalASRText.trimmingCharacters(in: .whitespaces) : processedText
-        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: '\(textToUse.prefix(80))'")
+        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: '\(textToUse.prefix(200))'")
 
         guard !textToUse.isEmpty else {
             AppLogger.log("[SessionController#\(id)] Empty text, aborting")
@@ -497,8 +453,6 @@ final class SessionController: ObservableObject {
         activeSessionID = 0
         useLLMPolish = false
         hasInjected = false
-        collectedSlices.removeAll()
-        streamingResults.removeAll()
         recordingStartTime = nil
         previewText = ""
         amplitude = 0.0
@@ -509,6 +463,9 @@ final class SessionController: ObservableObject {
         previewStreamTask = nil
         errorDismissTask?.cancel()
         errorDismissTask = nil
+        pipeline?.cancel()
+        pipeline = nil
+        accumulator = nil
         stopRecordingTimer()
         WindowManager.shared.hide()
     }
@@ -534,14 +491,6 @@ final class SessionController: ObservableObject {
             return "麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。"
         } else {
             return "请在系统设置中允许麦克风访问"
-        }
-    }
-
-    private func orderedTexts(from dict: [Int: String], maxIndex: Int) -> [String] {
-        guard maxIndex >= 1 else { return [] }
-        return (1...maxIndex).compactMap { i in
-            guard let text = dict[i], !text.isEmpty else { return nil }
-            return text
         }
     }
 }
