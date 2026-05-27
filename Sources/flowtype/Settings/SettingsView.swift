@@ -260,7 +260,7 @@ struct ProviderEditSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(provider.id == UUID() ? "添加 Provider" : "编辑 Provider")
+            Text(provider.name.isEmpty ? "添加 Provider" : "编辑 Provider")
                 .font(.system(size: 16, weight: .semibold))
 
             ServiceConfigCard(
@@ -301,17 +301,6 @@ struct ProviderRow: View {
 
     enum TestStatus: Equatable {
         case idle, testing, success, failure(String)
-
-        static func == (lhs: TestStatus, rhs: TestStatus) -> Bool {
-            switch (lhs, rhs) {
-            case (.idle, .idle), (.testing, .testing), (.success, .success):
-                return true
-            case (.failure(let a), .failure(let b)):
-                return a == b
-            default:
-                return false
-            }
-        }
     }
 
     var body: some View {
@@ -435,7 +424,7 @@ struct ProviderRow: View {
 // MARK: - Settings View
 
 struct SettingsPage: View {
-    @StateObject private var store = ConfigurationStore.shared
+    @ObservedObject private var store = ConfigurationStore.shared
     @State private var showSaved = false
     @State private var hasAccessibility = false
 

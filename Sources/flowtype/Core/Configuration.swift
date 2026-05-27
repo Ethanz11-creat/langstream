@@ -52,8 +52,6 @@ enum TriggerKey: String, Codable, CaseIterable {
     }
 }
 
-// TODO(B4): Wire up non-modifier key handling in WindowManager.eventTapCallback
-
 enum InteractionMode: String, Codable, CaseIterable {
     case tapToStart
     case toggle
