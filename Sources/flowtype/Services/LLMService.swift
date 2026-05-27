@@ -54,6 +54,83 @@ actor LLMService {
         return prompt
     }
 
+    // MARK: - Provider Resolution
+
+    private func resolveActiveProvider() -> (provider: LLMProvider, apiKey: String)? {
+        let providers = ConfigurationStore.shared.current.llmProviders
+
+        // Find the active provider
+        if let active = providers.first(where: \.isActive) {
+            if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(active.id),
+               !apiKey.isEmpty {
+                return (active, apiKey)
+            }
+        }
+
+        // Fallback to the first provider with a valid API key
+        for provider in providers {
+            if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(provider.id),
+               !apiKey.isEmpty {
+                return (provider, apiKey)
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Connection Test
+
+    func testConnection() async -> Result<String, LLMError> {
+        guard let resolved = resolveActiveProvider() else {
+            return .failure(LLMError.apiError("请在设置中配置 LLM API Key"))
+        }
+
+        let provider = resolved.provider
+        let apiKey = resolved.apiKey
+
+        guard let url = URL(string: "\(provider.baseURL)/chat/completions") else {
+            return .failure(LLMError.invalidResponse)
+        }
+
+        let body: [String: Any] = [
+            "model": provider.model,
+            "messages": [
+                ["role": "user", "content": "hello"]
+            ],
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": 5
+        ]
+
+        do {
+            let requestBody = try JSONSerialization.data(withJSONObject: body)
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 10
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = requestBody
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return .failure(LLMError.apiError("Non-HTTP response"))
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                let statusCode = httpResponse.statusCode
+                let errorBody = String(data: data, encoding: .utf8) ?? "(unable to decode error body)"
+                AppLogger.log("[LLMService] testConnection HTTP \(statusCode): \(errorBody.prefix(500))")
+                return .failure(LLMError.apiError("HTTP \(statusCode): \(errorBody.prefix(200))"))
+            }
+
+            return .success("连接成功")
+        } catch {
+            AppLogger.log("[LLMService] testConnection error: \(error)")
+            return .failure(LLMError.networkError(error))
+        }
+    }
+
     // MARK: - Shared streaming infrastructure
 
     private func makeStream(
@@ -63,9 +140,6 @@ actor LLMService {
         timeoutSeconds: UInt64,
         config: Configuration
     ) -> AsyncThrowingStream<String, Error> {
-        let apiKey = config.llmApiKey
-        let baseURL = config.llmBaseURL
-        let model = config.llmModel
         let temperature = config.temperature
 
         return AsyncThrowingStream { continuation in
@@ -79,11 +153,17 @@ actor LLMService {
                     continuation.finish()
                     return
                 }
+
+                guard let resolved = self.resolveActiveProvider() else {
+                    continuation.finish(throwing: LLMError.apiError("请在设置中配置 LLM API Key"))
+                    return
+                }
+
                 do {
                     try await Self.streamRequest(
-                        apiKey: apiKey,
-                        baseURL: baseURL,
-                        model: model,
+                        apiKey: resolved.apiKey,
+                        baseURL: resolved.provider.baseURL,
+                        model: resolved.provider.model,
                         temperature: temperature,
                         systemPrompt: systemPrompt,
                         userMessage: validatedText,
