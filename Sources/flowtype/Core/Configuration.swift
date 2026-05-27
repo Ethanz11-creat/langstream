@@ -110,6 +110,17 @@ struct LLMProvider: Codable, Equatable, Identifiable {
         self.model = model
         self.isActive = isActive
     }
+
+    static func defaultSiliconFlow(id: UUID = UUID(), isActive: Bool = true) -> LLMProvider {
+        LLMProvider(
+            id: id,
+            name: "默认配置",
+            provider: "SiliconFlow",
+            baseURL: "https://api.siliconflow.cn/v1",
+            model: "deepseek-ai/DeepSeek-V3",
+            isActive: isActive
+        )
+    }
 }
 
 // MARK: - Service Config

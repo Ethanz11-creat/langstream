@@ -56,9 +56,7 @@ actor LLMService {
 
     // MARK: - Provider Resolution
 
-    private func resolveActiveProvider() -> (provider: LLMProvider, apiKey: String)? {
-        let providers = ConfigurationStore.shared.current.llmProviders
-
+    private func resolveActiveProvider(providers: [LLMProvider]) -> (provider: LLMProvider, apiKey: String)? {
         // Find the active provider
         if let active = providers.first(where: \.isActive) {
             if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(active.id),
@@ -80,13 +78,11 @@ actor LLMService {
 
     // MARK: - Connection Test
 
-    func testConnection() async -> Result<String, LLMError> {
-        guard let resolved = resolveActiveProvider() else {
+    func testConnection(provider: LLMProvider) async -> Result<String, LLMError> {
+        guard let apiKey = ConfigurationStore.shared.loadProviderAPIKey(provider.id),
+              !apiKey.isEmpty else {
             return .failure(LLMError.apiError("请在设置中配置 LLM API Key"))
         }
-
-        let provider = resolved.provider
-        let apiKey = resolved.apiKey
 
         guard let url = URL(string: "\(provider.baseURL)/chat/completions") else {
             return .failure(LLMError.invalidResponse)
@@ -154,7 +150,7 @@ actor LLMService {
                     return
                 }
 
-                guard let resolved = self.resolveActiveProvider() else {
+                guard let resolved = self.resolveActiveProvider(providers: config.llmProviders) else {
                     continuation.finish(throwing: LLMError.apiError("请在设置中配置 LLM API Key"))
                     return
                 }

@@ -403,7 +403,7 @@ struct ProviderRow: View {
     private func runTest() async {
         testStatus = .testing
         let service = LLMService()
-        let result = await service.testConnection()
+        let result = await service.testConnection(provider: provider)
         await MainActor.run {
             switch result {
             case .success:
@@ -866,7 +866,12 @@ struct SettingsPage: View {
     }
 
     private func deleteProvider(_ id: UUID) {
+        let wasActive = store.current.llmProviders.first(where: { $0.id == id })?.isActive ?? false
         store.current.llmProviders.removeAll(where: { $0.id == id })
         ConfigurationStore.shared.deleteProviderAPIKey(id)
+        // Auto-activate another provider if the active one was deleted
+        if wasActive, !store.current.llmProviders.isEmpty {
+            store.current.llmProviders[0].isActive = true
+        }
     }
 }

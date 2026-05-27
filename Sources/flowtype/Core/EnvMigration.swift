@@ -20,14 +20,7 @@ enum EnvMigration {
         let env = dotEnv.merging(processEnv) { _, new in new }
 
         // Env migration: update the active (first) provider, or create one if none exist
-        var activeProvider = config.llmProviders.first ?? LLMProvider(
-            id: UUID(),
-            name: "默认配置",
-            provider: "SiliconFlow",
-            baseURL: "https://api.siliconflow.cn/v1",
-            model: "deepseek-ai/DeepSeek-V3",
-            isActive: true
-        )
+        var activeProvider = config.llmProviders.first ?? LLMProvider.defaultSiliconFlow(isActive: true)
         if let apiKey = env["SILICONFLOW_API_KEY"], !apiKey.isEmpty {
             ConfigurationStore.shared.saveProviderAPIKey(apiKey, for: activeProvider.id)
             didMigrate = true
@@ -76,14 +69,7 @@ enum EnvMigration {
         }
 
         var newConfig = config
-        var activeProvider = newConfig.llmProviders.first ?? LLMProvider(
-            id: UUID(),
-            name: "默认配置",
-            provider: "SiliconFlow",
-            baseURL: "https://api.siliconflow.cn/v1",
-            model: "deepseek-ai/DeepSeek-V3",
-            isActive: true
-        )
+        var activeProvider = newConfig.llmProviders.first ?? LLMProvider.defaultSiliconFlow(isActive: true)
 
         if let apiKey = old.apiKey, !apiKey.isEmpty {
             ConfigurationStore.shared.saveProviderAPIKey(apiKey, for: activeProvider.id)
