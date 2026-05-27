@@ -77,6 +77,9 @@ class WindowManager: ObservableObject {
     /// observer so the C callback can check without crossing actor isolation.
     private static var cachedSessionActive = UnsafeCell<Bool>(false)
 
+    /// Cached interaction mode for safe access from C callback.
+    private static var cachedInteractionMode = UnsafeCell<InteractionMode>(.tapToStart)
+
     init() {
         let view = AnyView(
             CapsuleView()
@@ -118,7 +121,8 @@ class WindowManager: ObservableObject {
         }
 
         Self.cachedTriggerKey.value = triggerKey
-        AppLogger.log("[WindowManager] Cached triggerKey: \(triggerKey.displayName)")
+        Self.cachedInteractionMode.value = ConfigurationStore.shared.current.interactionMode
+        AppLogger.log("[WindowManager] Cached triggerKey: \(triggerKey.displayName), interactionMode: \(Self.cachedInteractionMode.value.displayName)")
 
         setupCGEventTap()
         AppLogger.log("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
@@ -131,6 +135,7 @@ class WindowManager: ObservableObject {
             guard let self = self else { return }
             AppLogger.log("[WindowManager] Executing debounced reload...")
             Self.cachedTriggerKey.value = self.triggerKey
+            Self.cachedInteractionMode.value = ConfigurationStore.shared.current.interactionMode
             self.eventTapHealthTimer.cancel()
             if let tap = self.eventTapPort {
                 CGEvent.tapEnable(tap: tap, enable: false)
@@ -171,6 +176,7 @@ class WindowManager: ObservableObject {
         AppLogger.log("[WindowManager] setupCGEventTap called")
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
                       | CGEventMask(1 << CGEventType.keyDown.rawValue)
+                      | CGEventMask(1 << CGEventType.keyUp.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -218,6 +224,41 @@ class WindowManager: ObservableObject {
                 }
                 return nil
             }
+
+            // Handle non-modifier trigger keys (F13, F14, F15, Caps Lock, Right Command)
+            if !cachedTriggerKey.value.isModifier,
+               let triggerKeyCode = cachedTriggerKey.value.keyCode,
+               keyCode == Int64(triggerKeyCode) {
+                let mode = cachedInteractionMode.value
+                if mode == .toggle {
+                    AppLogger.log("[EventTap] Non-modifier trigger key pressed (toggle mode)")
+                    DispatchQueue.main.async {
+                        let controller = SessionController.shared
+                        if controller.isRecording {
+                            controller.endRecording(withPolish: false)
+                        } else {
+                            controller.startRecording()
+                        }
+                    }
+                } else {
+                    AppLogger.log("[EventTap] Non-modifier trigger key pressed (tapToStart mode)")
+                    OptionTapDetector.shared.recordTap()
+                }
+                return nil
+            }
+
+            return Unmanaged.passRetained(event)
+        }
+
+        if type == .keyUp {
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            if !cachedTriggerKey.value.isModifier,
+               let triggerKeyCode = cachedTriggerKey.value.keyCode,
+               keyCode == Int64(triggerKeyCode) {
+                // Non-modifier trigger key released — nothing to do here.
+                // State is managed on keyDown.
+                return nil
+            }
             return Unmanaged.passRetained(event)
         }
 
@@ -252,7 +293,14 @@ class WindowManager: ObservableObject {
     private func handleDoubleTap() {
         let controller = SessionController.shared
         let wasRecording = controller.isRecording
-        AppLogger.log("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording)")
+        let mode = ConfigurationStore.shared.current.interactionMode
+        AppLogger.log("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording), mode=\(mode)")
+
+        if mode == .toggle {
+            // In toggle mode, double-tap is same as single-tap
+            handleSingleTap()
+            return
+        }
 
         if wasRecording {
             AppLogger.log("[WindowManager] → DOUBLE-TAP END (with LLM polish)")
@@ -266,7 +314,19 @@ class WindowManager: ObservableObject {
     @MainActor
     private func handleSingleTap() {
         let controller = SessionController.shared
-        AppLogger.log("[WindowManager] handleSingleTap — isRecording=\(controller.isRecording)")
+        let mode = ConfigurationStore.shared.current.interactionMode
+        AppLogger.log("[WindowManager] handleSingleTap — isRecording=\(controller.isRecording), mode=\(mode)")
+
+        if mode == .toggle {
+            if controller.isRecording {
+                AppLogger.log("[WindowManager] → SINGLE-TAP END (raw ASR)")
+                controller.endRecording(withPolish: false)
+            } else {
+                AppLogger.log("[WindowManager] → SINGLE-TAP START recording")
+                controller.startRecording()
+            }
+            return
+        }
 
         if controller.isRecording {
             AppLogger.log("[WindowManager] → SINGLE-TAP END (raw ASR)")
