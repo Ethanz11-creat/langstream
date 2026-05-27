@@ -19,15 +19,33 @@ enum EnvMigration {
         let processEnv = ProcessInfo.processInfo.environment
         let env = dotEnv.merging(processEnv) { _, new in new }
 
+        // Env migration: update the active (first) provider, or create one if none exist
+        var activeProvider = config.llmProviders.first ?? LLMProvider(
+            id: UUID(),
+            name: "默认配置",
+            provider: "SiliconFlow",
+            baseURL: "https://api.siliconflow.cn/v1",
+            model: "deepseek-ai/DeepSeek-V3",
+            isActive: true
+        )
         if let apiKey = env["SILICONFLOW_API_KEY"], !apiKey.isEmpty {
-            config.llmApiKey = apiKey
+            ConfigurationStore.shared.saveProviderAPIKey(apiKey, for: activeProvider.id)
             didMigrate = true
         }
         if let baseURL = env["SILICONFLOW_BASE_URL"], !baseURL.isEmpty {
-            config.llmBaseURL = baseURL
+            activeProvider.baseURL = baseURL
             didMigrate = true
         }
-        apply(env["LLM_MODEL"], to: &config.llmModel, didMigrate: &didMigrate)
+        if let model = env["LLM_MODEL"], !model.isEmpty {
+            activeProvider.model = model
+            didMigrate = true
+        }
+        // Ensure the provider is in the list
+        if config.llmProviders.isEmpty {
+            config.llmProviders = [activeProvider]
+        } else {
+            config.llmProviders[0] = activeProvider
+        }
 
         // Migrate from old flat config format if present
         if let oldData = UserDefaults.standard.data(forKey: "flowtype.config"),
@@ -58,18 +76,32 @@ enum EnvMigration {
         }
 
         var newConfig = config
+        var activeProvider = newConfig.llmProviders.first ?? LLMProvider(
+            id: UUID(),
+            name: "默认配置",
+            provider: "SiliconFlow",
+            baseURL: "https://api.siliconflow.cn/v1",
+            model: "deepseek-ai/DeepSeek-V3",
+            isActive: true
+        )
 
         if let apiKey = old.apiKey, !apiKey.isEmpty {
-            newConfig.llmApiKey = apiKey
+            ConfigurationStore.shared.saveProviderAPIKey(apiKey, for: activeProvider.id)
         }
         if let baseURL = old.baseURL, !baseURL.isEmpty {
-            newConfig.llmBaseURL = baseURL
+            activeProvider.baseURL = baseURL
         }
         if let llmModel = old.llmModel, !llmModel.isEmpty {
-            newConfig.llmModel = llmModel
+            activeProvider.model = llmModel
         }
         if let triggerKey = old.triggerKey {
             newConfig.triggerKey = triggerKey
+        }
+
+        if newConfig.llmProviders.isEmpty {
+            newConfig.llmProviders = [activeProvider]
+        } else {
+            newConfig.llmProviders[0] = activeProvider
         }
 
         return newConfig

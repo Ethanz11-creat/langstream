@@ -52,6 +52,8 @@ enum TriggerKey: String, Codable, CaseIterable {
     }
 }
 
+// TODO(B4): Wire up non-modifier key handling in WindowManager.eventTapCallback
+
 enum InteractionMode: String, Codable, CaseIterable {
     case tapToStart
     case toggle
@@ -92,6 +94,26 @@ struct ProviderPreset: Identifiable, Hashable {
     static let all: [ProviderPreset] = [.siliconFlow, .openAI, .azure, .custom]
 }
 
+// MARK: - LLM Provider
+
+struct LLMProvider: Codable, Equatable, Identifiable {
+    let id: UUID
+    var name: String
+    var provider: String       // preset name: "SiliconFlow", "OpenAI", "Azure", "Custom"
+    var baseURL: String
+    var model: String
+    var isActive: Bool
+
+    init(id: UUID = UUID(), name: String, provider: String, baseURL: String, model: String, isActive: Bool = false) {
+        self.id = id
+        self.name = name
+        self.provider = provider
+        self.baseURL = baseURL
+        self.model = model
+        self.isActive = isActive
+    }
+}
+
 // MARK: - Service Config
 
 struct ServiceConfig: Codable, Equatable {
@@ -115,10 +137,36 @@ struct Configuration: Codable, Equatable {
     var asrLanguage: WhisperLanguage = .zh
 
     // LLM
-    var llmProvider: String = "SiliconFlow"
-    var llmBaseURL: String = "https://api.siliconflow.cn/v1"
-    var llmApiKey: String = ""
-    var llmModel: String = "deepseek-ai/DeepSeek-V3"
+    var llmProviders: [LLMProvider] = []
+
+    // Backward-compatible computed properties (active provider)
+    var llmProvider: String {
+        get { llmProviders.first(where: \.isActive)?.provider ?? "" }
+        set {
+            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
+            llmProviders[idx].provider = newValue
+        }
+    }
+    var llmBaseURL: String {
+        get { llmProviders.first(where: \.isActive)?.baseURL ?? "" }
+        set {
+            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
+            llmProviders[idx].baseURL = newValue
+        }
+    }
+    var llmModel: String {
+        get { llmProviders.first(where: \.isActive)?.model ?? "" }
+        set {
+            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
+            llmProviders[idx].model = newValue
+        }
+    }
+    var llmApiKey: String {
+        get { "" }  // API keys are stored in Keychain, not the struct
+        set {
+            // No-op: API keys are stored in Keychain via ConfigurationStore
+        }
+    }
 
     // Other settings
     var triggerKey: TriggerKey = .command
@@ -189,16 +237,60 @@ struct Configuration: Codable, Equatable {
         asrLanguage = (try? c.decode(WhisperLanguage.self, forKey: .asrLanguage))
             ?? (try? legacy?.decode(WhisperLanguage.self, forKey: .whisperLanguage))
             ?? d.asrLanguage
-        llmProvider = (try? c.decode(String.self, forKey: .llmProvider)) ?? d.llmProvider
-        llmBaseURL = (try? c.decode(String.self, forKey: .llmBaseURL)) ?? d.llmBaseURL
-        llmApiKey = (try? c.decode(String.self, forKey: .llmApiKey)) ?? d.llmApiKey
-        llmModel = (try? c.decode(String.self, forKey: .llmModel)) ?? d.llmModel
         triggerKey = (try? c.decode(TriggerKey.self, forKey: .triggerKey)) ?? d.triggerKey
         interactionMode = (try? c.decode(InteractionMode.self, forKey: .interactionMode)) ?? d.interactionMode
         dumpAudio = (try? c.decode(Bool.self, forKey: .dumpAudio)) ?? d.dumpAudio
         enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
         enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
         systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? d.systemPrompt
+
+        // Try new multi-provider format first
+        if let providers = try? c.decode([LLMProvider].self, forKey: .llmProviders), !providers.isEmpty {
+            llmProviders = providers
+        } else {
+            // Migrate from old single-provider format
+            let oldProvider = (try? c.decode(String.self, forKey: .llmProvider)) ?? d.llmProvider
+            let oldBaseURL = (try? c.decode(String.self, forKey: .llmBaseURL)) ?? d.llmBaseURL
+            let oldModel = (try? c.decode(String.self, forKey: .llmModel)) ?? d.llmModel
+            llmProviders = [LLMProvider(
+                id: UUID(),
+                name: "默认配置",
+                provider: oldProvider,
+                baseURL: oldBaseURL,
+                model: oldModel,
+                isActive: true
+            )]
+        }
+    }
+}
+
+extension Configuration {
+    private enum CodingKeys: String, CodingKey {
+        case asrLanguage
+        case llmProviders
+        case triggerKey
+        case interactionMode
+        case dumpAudio
+        case enableFillerStrip
+        case enableTermCorrection
+        case systemPrompt
+        // Legacy keys (for migration only, not stored properties)
+        case llmProvider
+        case llmBaseURL
+        case llmModel
+        case llmApiKey
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(asrLanguage, forKey: .asrLanguage)
+        try container.encode(llmProviders, forKey: .llmProviders)
+        try container.encode(triggerKey, forKey: .triggerKey)
+        try container.encode(interactionMode, forKey: .interactionMode)
+        try container.encode(dumpAudio, forKey: .dumpAudio)
+        try container.encode(enableFillerStrip, forKey: .enableFillerStrip)
+        try container.encode(enableTermCorrection, forKey: .enableTermCorrection)
+        try container.encode(systemPrompt, forKey: .systemPrompt)
     }
 }
 

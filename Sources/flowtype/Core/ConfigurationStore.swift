@@ -8,8 +8,8 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
 
     private let defaultsKey = "flowtype.config"
     private let migrationVersionKey = "flowtype.migrationVersion"
-    private let currentMigrationVersion = 2
-    private let keychainLLMApiKeyKey = "llmApiKey"
+    private let currentMigrationVersion = 3
+    private let keychainServicePrefix = "llmProvider."
 
     init() {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
@@ -27,18 +27,34 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
             // Migration 2: move API key from UserDefaults JSON to Keychain
             if storedVersion < 2 {
                 if !config.llmApiKey.isEmpty {
-                    _ = KeychainHelper.save(key: keychainLLMApiKeyKey, value: config.llmApiKey)
+                    _ = KeychainHelper.save(key: "llmApiKey", value: config.llmApiKey)
                     AppLogger.log("[ConfigurationStore] Migrated API key to Keychain")
                 }
                 needsSave = true
             }
 
-            UserDefaults.standard.set(currentMigrationVersion, forKey: migrationVersionKey)
-
-            // Always load API key from Keychain (overrides whatever is in JSON)
-            if let keychainKey = KeychainHelper.load(key: keychainLLMApiKeyKey) {
-                config.llmApiKey = keychainKey
+            // Migration 3: migrate from single-provider to multi-provider format
+            if storedVersion < 3 {
+                if config.llmProviders.isEmpty {
+                    let oldProvider = LLMProvider(
+                        id: UUID(),
+                        name: "默认配置",
+                        provider: config.llmProvider,
+                        baseURL: config.llmBaseURL,
+                        model: config.llmModel,
+                        isActive: true
+                    )
+                    if let legacyApiKey = KeychainHelper.load(key: "llmApiKey"), !legacyApiKey.isEmpty {
+                        let providerKey = "\(self.keychainServicePrefix)\(oldProvider.id.uuidString)"
+                        _ = KeychainHelper.save(key: providerKey, value: legacyApiKey)
+                        AppLogger.log("[ConfigurationStore] Migrated legacy API key to provider \(oldProvider.id)")
+                    }
+                    config.llmProviders = [oldProvider]
+                    needsSave = true
+                }
             }
+
+            UserDefaults.standard.set(currentMigrationVersion, forKey: migrationVersionKey)
 
             if config.systemPrompt.isEmpty {
                 config.systemPrompt = Configuration.default.systemPrompt
@@ -46,10 +62,7 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
             }
 
             if needsSave {
-                // Save config without API key in UserDefaults
-                var configForDisk = config
-                configForDisk.llmApiKey = ""
-                if let encoded = try? JSONEncoder().encode(configForDisk) {
+                if let encoded = try? JSONEncoder().encode(config) {
                     UserDefaults.standard.set(encoded, forKey: defaultsKey)
                 }
             }
@@ -64,24 +77,39 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
     func save(_ config: Configuration) {
         self.current = config
 
-        // Save API key to Keychain
-        if !config.llmApiKey.isEmpty {
-            _ = KeychainHelper.save(key: keychainLLMApiKeyKey, value: config.llmApiKey)
-        } else {
-            KeychainHelper.delete(key: keychainLLMApiKeyKey)
-        }
-
         saveWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            // Strip API key before writing to UserDefaults
-            var configForDisk = config
-            configForDisk.llmApiKey = ""
-            if let data = try? JSONEncoder().encode(configForDisk) {
+            if let data = try? JSONEncoder().encode(config) {
                 UserDefaults.standard.set(data, forKey: self.defaultsKey)
             }
         }
         self.saveWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+
+    // MARK: - Provider API Key Helpers
+
+    func keychainKey(for providerID: UUID) -> String {
+        return "\(keychainServicePrefix)\(providerID.uuidString)"
+    }
+
+    func saveProviderAPIKey(_ apiKey: String, for providerID: UUID) {
+        let key = keychainKey(for: providerID)
+        if !apiKey.isEmpty {
+            _ = KeychainHelper.save(key: key, value: apiKey)
+        } else {
+            KeychainHelper.delete(key: key)
+        }
+    }
+
+    func loadProviderAPIKey(_ providerID: UUID) -> String? {
+        let key = keychainKey(for: providerID)
+        return KeychainHelper.load(key: key)
+    }
+
+    func deleteProviderAPIKey(_ providerID: UUID) {
+        let key = keychainKey(for: providerID)
+        KeychainHelper.delete(key: key)
     }
 }
