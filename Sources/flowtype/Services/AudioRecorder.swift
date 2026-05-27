@@ -34,7 +34,12 @@ final class AudioRecorder: @unchecked Sendable {
     }
 
     // Diagnostics
-    private nonisolated(unsafe) var tapCallCount = 0
+    private struct HeartbeatState {
+        var tapCallCount = 0
+        var lastTapCallCount = 0
+        var lastTapTimestamp: Date?
+    }
+    private let heartbeatLock = OSAllocatedUnfairLock<HeartbeatState>(uncheckedState: HeartbeatState())
 
     /// Callback to forward real-time audio buffers to a streaming recognizer.
     var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
@@ -43,8 +48,6 @@ final class AudioRecorder: @unchecked Sendable {
     var onRecordingFrozen: (() -> Void)?
 
     // MARK: - Heartbeat detection
-    private nonisolated(unsafe) var lastTapCallCount = 0
-    private nonisolated(unsafe) var lastTapTimestamp: Date?
     private var heartbeatTimer = CancellableTimer()
     private let heartbeatInterval: TimeInterval = 2.0
     private let heartbeatTimeout: TimeInterval = 5.0
@@ -98,21 +101,28 @@ final class AudioRecorder: @unchecked Sendable {
             _isRecording = true
             _isStopping = false
         }
-        tapCallCount = 0
-        lastTapCallCount = 0
-        lastTapTimestamp = Date()
+        heartbeatLock.withLock { state in
+            state.tapCallCount = 0
+            state.lastTapCallCount = 0
+            state.lastTapTimestamp = Date()
+        }
         sampleLock.withLock {
             rawSamples.removeAll(keepingCapacity: true)
         }
         heartbeatTimer.schedule(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] in
             guard let self = self else { return }
             guard self.isRecording && !self.isStopping else { return }
-            let currentCount = self.tapCallCount
+            let (currentCount, lastCount, lastTimestamp) = self.heartbeatLock.withLock { state in
+                (state.tapCallCount, state.lastTapCallCount, state.lastTapTimestamp)
+            }
             let now = Date()
-            if currentCount > self.lastTapCallCount {
-                self.lastTapCallCount = currentCount
-                self.lastTapTimestamp = now
-            } else if let lastTap = self.lastTapTimestamp, now.timeIntervalSince(lastTap) > self.heartbeatTimeout {
+            if currentCount > lastCount {
+                self.heartbeatLock.withLock { state in
+                    state.lastTapCallCount = currentCount
+                    state.lastTapTimestamp = now
+                }
+            } else if let lastTap = lastTimestamp, now.timeIntervalSince(lastTap) > self.heartbeatTimeout {
+                guard self.isRecording && !self.isStopping else { return }
                 print("[AudioRecorder] HEARTBEAT FAILURE: No tap callbacks for \(self.heartbeatTimeout)s. Auto-stopping.")
                 self.heartbeatTimer.cancel()
                 self.onRecordingFrozen?()
@@ -126,7 +136,7 @@ final class AudioRecorder: @unchecked Sendable {
                 guard let self = self else { return }
                 guard self.isRecording || self.isStopping else { return }
 
-                self.tapCallCount += 1
+                self.heartbeatLock.withLock { $0.tapCallCount += 1 }
 
                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameCapacity) else {
                     return
@@ -179,7 +189,8 @@ final class AudioRecorder: @unchecked Sendable {
     }
 
     nonisolated func stopRecording() {
-        print("[AudioRecorder] stopRecording called, tapCallCount=\(tapCallCount)")
+        let tapCount = heartbeatLock.withLock { $0.tapCallCount }
+        print("[AudioRecorder] stopRecording called, tapCallCount=\(tapCount)")
 
         let wasRecording = stateLock.withLock {
             let was = _isRecording || _isStopping
@@ -192,12 +203,12 @@ final class AudioRecorder: @unchecked Sendable {
             return
         }
 
-        if tapCallCount == 0 {
+        if heartbeatLock.withLock({ $0.tapCallCount }) == 0 {
             print("[AudioRecorder] CRITICAL: No tap callbacks received.")
         }
 
         heartbeatTimer.cancel()
-        lastTapTimestamp = nil
+        heartbeatLock.withLock { $0.lastTapTimestamp = nil }
         amplitudeContinuation?.finish()
         amplitudeContinuation = nil
 

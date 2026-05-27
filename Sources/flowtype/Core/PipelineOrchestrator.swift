@@ -137,6 +137,13 @@ final class SessionController: ObservableObject {
         recordingTask?.cancel()
         recordingTask = nil
 
+        // Flush any pending preview debounce so the final preview text is complete
+        previewDebounceTask?.cancel()
+        previewDebounceTask = nil
+        if !pendingPreviewText.isEmpty {
+            previewText = pendingPreviewText
+        }
+
         let providerName = speechRouter.qwenProvider.isLoaded ? "Qwen3-ASR" : "AppleSpeech"
         sessionState = .processing(provider: providerName)
 
@@ -266,6 +273,14 @@ final class SessionController: ObservableObject {
                     context: nil
                 )
                 AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: '\(finalASRText.prefix(200))'")
+                guard activeSessionID == id else {
+                    AppLogger.log("[SessionController#\(id)] Session changed after transcription, discarding result")
+                    throw CancellationError()
+                }
+            } catch is CancellationError {
+                AppLogger.log("[SessionController#\(id)] Qwen3-ASR cancelled")
+                resetToIdle()
+                return
             } catch {
                 AppLogger.log("[SessionController#\(id)] Qwen3-ASR failed: \(error)")
                 finalASRText = ""
@@ -285,6 +300,7 @@ final class SessionController: ObservableObject {
         guard !textToUse.isEmpty else {
             AppLogger.log("[SessionController#\(id)] Empty text, aborting")
             showError("语音识别结果为空")
+            resetToIdle()
             return
         }
 
@@ -319,6 +335,8 @@ final class SessionController: ObservableObject {
                 return
             } catch {
                 AppLogger.log("[SessionController#\(id)] LLM polish failed: \(error)")
+                sessionState = .polishing(preview: "⚠️ 润色失败，使用原始文本")
+                try? await Task.sleep(nanoseconds: 800_000_000)
             }
 
             let finalText = polishedText ?? textToUse
@@ -334,6 +352,7 @@ final class SessionController: ObservableObject {
     private func injectText(_ text: String, sessionID: UInt64) async {
         guard !hasInjected else {
             AppLogger.log("[SessionController#\(sessionID)] Duplicate injection blocked")
+            resetToIdle()
             return
         }
         hasInjected = true
@@ -347,6 +366,7 @@ final class SessionController: ObservableObject {
 
         guard activeSessionID == sessionID else {
             AppLogger.log("[SessionController#\(sessionID)] Session changed before injection, aborting")
+            resetToIdle()
             return
         }
 
@@ -358,6 +378,7 @@ final class SessionController: ObservableObject {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             showError("已复制到剪贴板")
+            resetToIdle()
             return
         }
 

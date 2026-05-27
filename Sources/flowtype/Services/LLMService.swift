@@ -9,14 +9,6 @@ enum LLMError: Error {
 }
 
 actor LLMService {
-    private var config: Configuration {
-        ConfigurationStore.shared.current
-    }
-
-    private var apiKey: String { config.llmApiKey }
-    private var baseURL: String { config.llmBaseURL }
-    private var model: String { config.llmModel }
-    private var temperature: Double { config.temperature }
 
     init() {}
 
@@ -36,9 +28,10 @@ actor LLMService {
     // MARK: - Public API
 
     func polishText(_ text: String, systemPrompt: String? = nil) -> AsyncThrowingStream<String, Error> {
-        let prompt = systemPrompt ?? self.config.systemPrompt
-        let maxTokens = self.config.maxTokens
-        return makeStream(text: text, systemPrompt: prompt, maxTokens: maxTokens, timeoutSeconds: 30)
+        let config = ConfigurationStore.shared.current
+        let prompt = systemPrompt ?? config.systemPrompt
+        let maxTokens = config.maxTokens
+        return makeStream(text: text, systemPrompt: prompt, maxTokens: maxTokens, timeoutSeconds: 30, config: config)
     }
 
     @MainActor
@@ -67,12 +60,13 @@ actor LLMService {
         text: String,
         systemPrompt: String,
         maxTokens: Int,
-        timeoutSeconds: UInt64
+        timeoutSeconds: UInt64,
+        config: Configuration
     ) -> AsyncThrowingStream<String, Error> {
-        let apiKey = self.apiKey
-        let baseURL = self.baseURL
-        let model = self.model
-        let temperature = self.temperature
+        let apiKey = config.llmApiKey
+        let baseURL = config.llmBaseURL
+        let model = config.llmModel
+        let temperature = config.temperature
 
         return AsyncThrowingStream { continuation in
             Task {

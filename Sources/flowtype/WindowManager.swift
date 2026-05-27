@@ -61,6 +61,7 @@ class WindowManager: ObservableObject {
 
     private var eventTapPort: CFMachPort?
     private var sessionStateCancellable: AnyCancellable?
+    private var reloadWorkItem: DispatchWorkItem?
 
     /// Periodic timer to ensure the CGEvent tap stays enabled after system events.
     private var eventTapHealthTimer = CancellableTimer()
@@ -124,19 +125,26 @@ class WindowManager: ObservableObject {
     }
 
     func reloadHotkey() {
-        AppLogger.log("[WindowManager] Reloading hotkey configuration...")
-        Self.cachedTriggerKey.value = triggerKey
-        eventTapHealthTimer.cancel()
-        if let tap = eventTapPort {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
-                CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        AppLogger.log("[WindowManager] Queuing debounced hotkey reload...")
+        reloadWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            AppLogger.log("[WindowManager] Executing debounced reload...")
+            Self.cachedTriggerKey.value = self.triggerKey
+            self.eventTapHealthTimer.cancel()
+            if let tap = self.eventTapPort {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
+                    CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+                }
+                CFMachPortInvalidate(tap)
+                self.eventTapPort = nil
             }
-            CFMachPortInvalidate(tap)
-            eventTapPort = nil
+            self.setupCGEventTap()
+            AppLogger.log("[WindowManager] Hotkey reloaded with trigger key: \(self.triggerKey.displayName)")
         }
-        setupCGEventTap()
-        AppLogger.log("[WindowManager] Hotkey reloaded with trigger key: \(triggerKey.displayName)")
+        reloadWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
     private func startEventTapHealthCheck() {
@@ -193,6 +201,7 @@ class WindowManager: ObservableObject {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let refcon = refcon {
                 let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()
+                assert(WindowManager.shared === manager, "eventTapCallback refcon must point to the WindowManager singleton")
                 if let tap = manager.eventTapPort {
                     CGEvent.tapEnable(tap: tap, enable: true)
                 }
@@ -213,6 +222,10 @@ class WindowManager: ObservableObject {
         }
 
         guard type == .flagsChanged else {
+            return Unmanaged.passRetained(event)
+        }
+
+        guard !KeyboardInjector.isInjecting.withLock({ $0 }) else {
             return Unmanaged.passRetained(event)
         }
 

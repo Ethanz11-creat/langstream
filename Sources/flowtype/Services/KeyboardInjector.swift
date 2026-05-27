@@ -10,6 +10,7 @@ enum InjectionError: Error {
 struct KeyboardInjector {
 
     private static let injectionLock = OSAllocatedUnfairLock<Bool>(uncheckedState: false)
+    static let isInjecting = OSAllocatedUnfairLock<Bool>(uncheckedState: false)
 
     // MARK: - Entry point: chooses paste for multi-line, keystroke for single-line
 
@@ -20,7 +21,7 @@ struct KeyboardInjector {
             return true
         }
         guard canProceed else {
-            print("[KeyboardInjector] Injection already in progress, ignoring duplicate")
+            AppLogger.log("[KeyboardInjector] Injection already in progress, ignoring duplicate")
             return
         }
 
@@ -31,16 +32,16 @@ struct KeyboardInjector {
         }
         let startTime = Date()
         defer {
-            print("[KeyboardInjector] Total injection time: \(String(format: "%.2f", Date().timeIntervalSince(startTime)))s")
+            AppLogger.log("[KeyboardInjector] Total injection time: \(String(format: "%.2f", Date().timeIntervalSince(startTime)))s")
         }
         // If text contains newlines or is long, paste via clipboard to preserve formatting
         // and avoid slow keystroke simulation. Short single-line text uses keystrokes for
         // better compatibility with apps that don't handle paste well.
         if text.contains("\n") || text.contains("\r") || text.count > 50 {
-            print("[KeyboardInjector] Using pasteText (chars=\(text.count), hasNewline=\(text.contains("\n")))")
+            AppLogger.log("[KeyboardInjector] Using pasteText (chars=\(text.count), hasNewline=\(text.contains("\n")))")
             try await pasteText(text)
         } else {
-            print("[KeyboardInjector] Using typeText (chars=\(text.count))")
+            AppLogger.log("[KeyboardInjector] Using typeText (chars=\(text.count))")
             try await typeText(text)
         }
     }
@@ -50,7 +51,7 @@ struct KeyboardInjector {
     private static func pasteText(_ text: String) async throws {
         let pasteStart = Date()
         defer {
-            print("[KeyboardInjector] pasteText completed in \(String(format: "%.2f", Date().timeIntervalSince(pasteStart)))s")
+            AppLogger.log("[KeyboardInjector] pasteText completed in \(String(format: "%.2f", Date().timeIntervalSince(pasteStart)))s")
         }
         let pasteboard = NSPasteboard.general
 
@@ -84,6 +85,9 @@ struct KeyboardInjector {
         vDown?.flags = .maskCommand
         vUp?.flags   = .maskCommand
 
+        isInjecting.withLock { $0 = true }
+        defer { isInjecting.withLock { $0 = false } }
+
         cmdDown?.post(tap: .cghidEventTap)
         try await Task.sleep(nanoseconds: 5_000_000)
         vDown?.post(tap: .cghidEventTap)
@@ -93,7 +97,7 @@ struct KeyboardInjector {
         cmdUp?.post(tap: .cghidEventTap)
 
         // 4. Wait for paste to complete, then restore clipboard
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        try await Task.sleep(nanoseconds: 500_000_000) // 500ms — give target app time to read clipboard
 
         pasteboard.clearContents()
         if let savedItems = savedItems, !savedItems.isEmpty {
@@ -114,7 +118,7 @@ struct KeyboardInjector {
     private static func typeText(_ text: String) async throws {
         let typeStart = Date()
         defer {
-            print("[KeyboardInjector] typeText completed in \(String(format: "%.2f", Date().timeIntervalSince(typeStart)))s")
+            AppLogger.log("[KeyboardInjector] typeText completed in \(String(format: "%.2f", Date().timeIntervalSince(typeStart)))s")
         }
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw InjectionError.eventSourceCreationFailed
@@ -141,9 +145,25 @@ struct KeyboardInjector {
     /// Inject a small text chunk during streaming LLM output.
     /// Caller manages sequencing (one chunk at a time via async for-await loop).
     static func typeChunk(_ chunk: String) async throws {
+        let canProceed = injectionLock.withLock { state in
+            if state { return false }
+            state = true
+            return true
+        }
+        guard canProceed else {
+            AppLogger.log("[KeyboardInjector] typeChunk rejected: injection already in progress")
+            return
+        }
+        defer {
+            injectionLock.withLock { state in
+                state = false
+            }
+        }
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw InjectionError.eventSourceCreationFailed
         }
+        isInjecting.withLock { $0 = true }
+        defer { isInjecting.withLock { $0 = false } }
         for character in chunk {
             try Task.checkCancellation()
             let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
