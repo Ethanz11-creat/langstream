@@ -774,6 +774,12 @@ struct SettingsPage: View {
         .onAppear {
             hasAccessibility = PermissionHelper.checkAccessibility()
         }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                hasAccessibility = PermissionHelper.checkAccessibility()
+            }
+        }
         .onChange(of: store.current) { _, _ in
             store.save(store.current)
             WindowManager.shared.reloadHotkey()

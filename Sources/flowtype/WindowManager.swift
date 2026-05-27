@@ -349,6 +349,8 @@ class WindowManager: ObservableObject {
     }
 
     func hide() {
+        // Don't hide the panel during text injection — user needs to see progress
+        guard SessionController.shared.sessionState != .injecting else { return }
         panel?.orderOut(nil)
     }
 
