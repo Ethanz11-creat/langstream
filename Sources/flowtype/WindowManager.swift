@@ -231,7 +231,12 @@ class WindowManager: ObservableObject {
 
         let flags = event.flags
         let triggerFlag = cachedTriggerKey.value.cgEventFlag
-        let isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
+        let isTriggerKeyNow: Bool
+        if let triggerFlag {
+            isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
+        } else {
+            isTriggerKeyNow = false
+        }
 
         if isTriggerKeyNow {
             AppLogger.log("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.value.displayName))")

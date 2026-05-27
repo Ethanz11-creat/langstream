@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 enum TriggerKey: String, Codable, CaseIterable {
-    case fn, control, option, command
+    case fn, control, option, command, f13, f14, f15, capsLock, rightCommand
 
     var displayName: String {
         switch self {
@@ -10,15 +10,56 @@ enum TriggerKey: String, Codable, CaseIterable {
         case .control: return "Control"
         case .option: return "Option"
         case .command: return "Command"
+        case .f13: return "F13"
+        case .f14: return "F14"
+        case .f15: return "F15"
+        case .capsLock: return "Caps Lock"
+        case .rightCommand: return "Right Command"
         }
     }
 
-    var cgEventFlag: CGEventFlags {
+    var isModifier: Bool {
+        switch self {
+        case .fn, .control, .option, .command, .rightCommand:
+            return true
+        case .f13, .f14, .f15, .capsLock:
+            return false
+        }
+    }
+
+    var cgEventFlag: CGEventFlags? {
         switch self {
         case .fn: return .maskSecondaryFn
         case .control: return .maskControl
         case .option: return .maskAlternate
         case .command: return .maskCommand
+        case .rightCommand: return .maskCommand
+        case .f13, .f14, .f15, .capsLock:
+            return nil
+        }
+    }
+
+    var keyCode: CGKeyCode? {
+        switch self {
+        case .f13: return 105
+        case .f14: return 107
+        case .f15: return 113
+        case .capsLock: return 57
+        case .rightCommand: return 54
+        case .fn, .control, .option, .command:
+            return nil
+        }
+    }
+}
+
+enum InteractionMode: String, Codable, CaseIterable {
+    case tapToStart
+    case toggle
+
+    var displayName: String {
+        switch self {
+        case .tapToStart: return "Tap to Start"
+        case .toggle: return "Toggle"
         }
     }
 }
@@ -81,6 +122,7 @@ struct Configuration: Codable, Equatable {
 
     // Other settings
     var triggerKey: TriggerKey = .command
+    var interactionMode: InteractionMode = .tapToStart
     var dumpAudio: Bool = false
     var enableFillerStrip: Bool = true
     var enableTermCorrection: Bool = true
@@ -152,6 +194,7 @@ struct Configuration: Codable, Equatable {
         llmApiKey = (try? c.decode(String.self, forKey: .llmApiKey)) ?? d.llmApiKey
         llmModel = (try? c.decode(String.self, forKey: .llmModel)) ?? d.llmModel
         triggerKey = (try? c.decode(TriggerKey.self, forKey: .triggerKey)) ?? d.triggerKey
+        interactionMode = (try? c.decode(InteractionMode.self, forKey: .interactionMode)) ?? d.interactionMode
         dumpAudio = (try? c.decode(Bool.self, forKey: .dumpAudio)) ?? d.dumpAudio
         enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
         enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
