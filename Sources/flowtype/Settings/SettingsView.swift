@@ -250,12 +250,200 @@ struct ServiceConfigCard: View {
     }
 }
 
+// MARK: - Provider Edit Sheet
+
+struct ProviderEditSheet: View {
+    @Binding var provider: LLMProvider
+    @Binding var apiKey: String
+    var onSave: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(provider.id == UUID() ? "添加 Provider" : "编辑 Provider")
+                .font(.system(size: 16, weight: .semibold))
+
+            ServiceConfigCard(
+                title: provider.name.isEmpty ? "新 Provider" : provider.name,
+                subtitle: "配置大语言模型服务商",
+                provider: $provider.provider,
+                baseURL: $provider.baseURL,
+                apiKey: $apiKey,
+                model: $provider.model,
+                modelPlaceholder: "例如：deepseek-ai/DeepSeek-V3"
+            )
+
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .buttonStyle(.plain)
+                Button("保存") {
+                    onSave()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+}
+
+// MARK: - Provider Row
+
+struct ProviderRow: View {
+    let provider: LLMProvider
+    let isActive: Bool
+    let onSetActive: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    @State private var testStatus: TestStatus = .idle
+
+    enum TestStatus: Equatable {
+        case idle, testing, success, failure(String)
+
+        static func == (lhs: TestStatus, rhs: TestStatus) -> Bool {
+            switch (lhs, rhs) {
+            case (.idle, .idle), (.testing, .testing), (.success, .success):
+                return true
+            case (.failure(let a), .failure(let b)):
+                return a == b
+            default:
+                return false
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status dot
+            Circle()
+                .fill(isActive ? Color.green : Color.gray.opacity(0.4))
+                .frame(width: 8, height: 8)
+
+            // Info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(provider.name)
+                    .font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 4) {
+                    Text(provider.provider)
+                        .font(.system(size: 10))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.12))
+                        .clipShape(Capsule())
+                    Text(provider.model)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            // Connection test indicator
+            HStack(spacing: 4) {
+                switch testStatus {
+                case .idle:
+                    EmptyView()
+                case .testing:
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 14, height: 14)
+                case .success:
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.green)
+                case .failure:
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.red)
+                }
+
+                Button(action: {
+                    Task {
+                        await runTest()
+                    }
+                }) {
+                    Image(systemName: "bolt.horizontal.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(testStatus == .testing)
+            }
+
+            // Actions
+            HStack(spacing: 6) {
+                if !isActive {
+                    Button("设为默认") {
+                        onSetActive()
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundColor(.blue)
+                }
+
+                Button("编辑") {
+                    onEdit()
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+
+                Button("删除") {
+                    onDelete()
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundColor(.red.opacity(0.8))
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isActive ? Color.green.opacity(0.4) : Color.secondary.opacity(0.08), lineWidth: isActive ? 2 : 1)
+        )
+    }
+
+    private func runTest() async {
+        testStatus = .testing
+        let service = LLMService()
+        let result = await service.testConnection()
+        await MainActor.run {
+            switch result {
+            case .success:
+                testStatus = .success
+            case .failure(let error):
+                let msg: String
+                switch error {
+                case .apiError(let s): msg = s
+                case .networkError(let e): msg = e.localizedDescription
+                default: msg = "连接失败"
+                }
+                testStatus = .failure(msg)
+            }
+        }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsPage: View {
     @StateObject private var store = ConfigurationStore.shared
     @State private var showSaved = false
     @State private var hasAccessibility = false
+
+    // Provider sheet states
+    @State private var showAddProvider = false
+    @State private var editingProvider: LLMProvider? = nil
+    @State private var draftProvider = LLMProvider(name: "", provider: "SiliconFlow", baseURL: "https://api.siliconflow.cn/v1", model: "", isActive: false)
+    @State private var draftApiKey = ""
 
     var body: some View {
         ScrollView {
@@ -329,15 +517,41 @@ struct SettingsPage: View {
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    ServiceConfigCard(
-                        title: "润色模型",
-                        subtitle: "用于整理和优化识别结果",
-                        provider: $store.current.llmProvider,
-                        baseURL: $store.current.llmBaseURL,
-                        apiKey: $store.current.llmApiKey,
-                        model: $store.current.llmModel,
-                        modelPlaceholder: "例如：deepseek-ai/DeepSeek-V3"
-                    )
+                    // Provider list
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(store.current.llmProviders) { provider in
+                            ProviderRow(
+                                provider: provider,
+                                isActive: provider.isActive,
+                                onSetActive: {
+                                    setActiveProvider(provider.id)
+                                },
+                                onEdit: {
+                                    startEditing(provider)
+                                },
+                                onDelete: {
+                                    deleteProvider(provider.id)
+                                }
+                            )
+                        }
+                    }
+
+                    Button {
+                        draftProvider = LLMProvider(
+                            name: "",
+                            provider: "SiliconFlow",
+                            baseURL: "https://api.siliconflow.cn/v1",
+                            model: "",
+                            isActive: false
+                        )
+                        draftApiKey = ""
+                        showAddProvider = true
+                    } label: {
+                        Label("添加 Provider", systemImage: "plus.circle")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.blue)
 
                     // System Prompt Editor
                     VStack(alignment: .leading, spacing: 6) {
@@ -398,8 +612,21 @@ struct SettingsPage: View {
                                     Text(key.displayName).tag(key)
                                 }
                             }
-                            .pickerStyle(.segmented)
-                            .frame(width: 280)
+                            .pickerStyle(.menu)
+                            .frame(width: 160)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("交互模式")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Picker("", selection: $store.current.interactionMode) {
+                                ForEach(InteractionMode.allCases, id: \.self) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 160)
                         }
 
                         Spacer()
@@ -407,45 +634,68 @@ struct SettingsPage: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 12) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "hand.tap.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.blue)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("单击")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    Text("停止录音，输出原始识别文本")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.secondary)
+                            if store.current.interactionMode == .tapToStart {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "hand.tap.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.blue)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("单击")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("停止录音，输出原始识别文本")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.blue.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.blue.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                            HStack(spacing: 6) {
-                                Image(systemName: "hand.tap.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.purple)
-                                Image(systemName: "hand.tap.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.purple)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("双击")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    Text("停止录音，输出润色后的文本")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.secondary)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "hand.tap.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.purple)
+                                    Image(systemName: "hand.tap.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.purple)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("双击")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("停止录音，输出润色后的文本")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.purple.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            } else {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "hand.tap.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.blue)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("单击")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("开始 / 停止录音")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.blue.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.purple.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
 
                             Spacer()
                         }
+
+                        Text("当前触发键：\(store.current.triggerKey.displayName)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -554,5 +804,74 @@ struct SettingsPage: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .sheet(isPresented: $showAddProvider) {
+            ProviderEditSheet(
+                provider: .init(
+                    get: { draftProvider },
+                    set: { draftProvider = $0 }
+                ),
+                apiKey: $draftApiKey,
+                onSave: {
+                    let newProvider = LLMProvider(
+                        name: draftProvider.name,
+                        provider: draftProvider.provider,
+                        baseURL: draftProvider.baseURL,
+                        model: draftProvider.model,
+                        isActive: store.current.llmProviders.isEmpty
+                    )
+                    store.current.llmProviders.append(newProvider)
+                    if !draftApiKey.isEmpty {
+                        ConfigurationStore.shared.saveProviderAPIKey(draftApiKey, for: newProvider.id)
+                    }
+                    showAddProvider = false
+                },
+                onCancel: {
+                    showAddProvider = false
+                }
+            )
+        }
+        .sheet(item: $editingProvider) { provider in
+            let idx = store.current.llmProviders.firstIndex(where: { $0.id == provider.id }) ?? 0
+            let binding = Binding<LLMProvider>(
+                get: { store.current.llmProviders[idx] },
+                set: { store.current.llmProviders[idx] = $0 }
+            )
+            ProviderEditSheet(
+                provider: binding,
+                apiKey: .init(
+                    get: { ConfigurationStore.shared.loadProviderAPIKey(provider.id) ?? "" },
+                    set: { newKey in
+                        if !newKey.isEmpty {
+                            ConfigurationStore.shared.saveProviderAPIKey(newKey, for: provider.id)
+                        } else {
+                            ConfigurationStore.shared.deleteProviderAPIKey(provider.id)
+                        }
+                    }
+                ),
+                onSave: {
+                    editingProvider = nil
+                },
+                onCancel: {
+                    editingProvider = nil
+                }
+            )
+        }
+    }
+
+    // MARK: - Provider Actions
+
+    private func setActiveProvider(_ id: UUID) {
+        for i in store.current.llmProviders.indices {
+            store.current.llmProviders[i].isActive = (store.current.llmProviders[i].id == id)
+        }
+    }
+
+    private func startEditing(_ provider: LLMProvider) {
+        editingProvider = provider
+    }
+
+    private func deleteProvider(_ id: UUID) {
+        store.current.llmProviders.removeAll(where: { $0.id == id })
+        ConfigurationStore.shared.deleteProviderAPIKey(id)
     }
 }
