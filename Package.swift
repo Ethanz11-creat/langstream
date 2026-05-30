@@ -34,5 +34,10 @@ let package = Package(
                 .linkedFramework("Speech")
             ]
         ),
+        .testTarget(
+            name: "FlowTypeTests",
+            dependencies: ["FlowType"],
+            path: "Tests/FlowTypeTests"
+        ),
     ]
 )
