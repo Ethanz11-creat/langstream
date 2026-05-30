@@ -94,10 +94,36 @@ struct CapsuleView: View {
         return nil
     }
 
+    private var idleHintText: String {
+        let config = ConfigurationStore.shared.current
+        let key = config.triggerKey
+        let mode = config.interactionMode
+
+        let keyName: String
+        switch key {
+        case .command: keyName = "⌘"
+        case .option: keyName = "⌥"
+        case .control: keyName = "⌃"
+        case .fn: keyName = "Fn"
+        case .rightCommand: keyName = "Right ⌘"
+        default: keyName = key.displayName
+        }
+
+        if mode == .toggle {
+            return "按 \(keyName) 切换语音输入"
+        }
+
+        if key.isModifier {
+            return "双击 \(keyName) 开始语音输入"
+        } else {
+            return "按住 \(keyName) 0.2 秒开始语音输入"
+        }
+    }
+
     private var statusSubtitle: String {
         switch session.sessionState {
         case .idle:
-            return "双击 Option 开始"
+            return idleHintText
         case .recording:
             return session.previewText.isEmpty ? "正在听写..." : session.previewText
         case .processing:
