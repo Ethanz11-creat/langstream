@@ -254,7 +254,7 @@ final class SessionController: ObservableObject {
         AppLogger.log("[SessionController#\(id)] AudioRecorder stopped in \(String(format: "%.2f", Date().timeIntervalSince(stopAudioStart)))s")
 
         let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
-        AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: '\(localPreviewText.prefix(80))'")
+        AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: \(localPreviewText.count) chars")
 
         let rawSamples = audioRecorder.takeAccumulatedSamples()
         let audioDuration = Double(rawSamples.count) / 16000.0
@@ -273,7 +273,7 @@ final class SessionController: ObservableObject {
                     language: nil,
                     context: nil
                 )
-                AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: '\(finalASRText.prefix(200))'")
+                AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: \(finalASRText.count) chars")
                 guard activeSessionID == id else {
                     AppLogger.log("[SessionController#\(id)] Session changed after transcription, discarding result")
                     throw CancellationError()
@@ -296,7 +296,7 @@ final class SessionController: ObservableObject {
         let postProcessStart = Date()
         let processedText = ASRPostProcessor.process(finalASRText)
         let textToUse = processedText.isEmpty ? finalASRText.trimmingCharacters(in: .whitespaces) : processedText
-        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: '\(textToUse.prefix(200))'")
+        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: \(textToUse.count) chars")
 
         guard !textToUse.isEmpty else {
             AppLogger.log("[SessionController#\(id)] Empty text, aborting")
@@ -326,7 +326,7 @@ final class SessionController: ObservableObject {
                 }
                 if !accumulated.isEmpty && accumulated != textToUse {
                     polishedText = accumulated
-                    AppLogger.log("[SessionController#\(id)] LLM polished in \(String(format: "%.1f", Date().timeIntervalSince(polishStart)))s: '\(accumulated.prefix(100))'")
+                    AppLogger.log("[SessionController#\(id)] LLM polished in \(String(format: "%.1f", Date().timeIntervalSince(polishStart)))s: \(accumulated.count) chars")
                 } else {
                     AppLogger.log("[SessionController#\(id)] LLM returned empty/same, using raw")
                 }

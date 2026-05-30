@@ -89,6 +89,11 @@ struct CapsuleView: View {
 
     private var recordingTimerText: String? {
         if case .recording(let seconds) = session.sessionState {
+            let maxDuration = ConfigurationStore.shared.current.maxRecordingDuration
+            let remaining = maxDuration - seconds
+            if remaining <= 30 && remaining > 0 {
+                return "剩余 \(remaining)s"
+            }
             return String(format: "%02d:%02d", seconds / 60, seconds % 60)
         }
         return nil

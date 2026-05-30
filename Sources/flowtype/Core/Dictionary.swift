@@ -46,6 +46,19 @@ final class DictionaryStore: ObservableObject {
 
     func addAutoDetected(phrase: String) {
         guard !phrase.isEmpty else { return }
+        // Security: reject suspicious patterns
+        guard phrase.count <= 50 else { return }
+        let lower = phrase.lowercased()
+        let forbidden = [
+            "ignore", "</system>", "```", "<script",
+            "http://", "https://", "ftp://",
+        ]
+        for pattern in forbidden {
+            if lower.contains(pattern) { return }
+        }
+        // Reject shell metacharacters
+        if phrase.rangeOfCharacter(from: CharacterSet(charactersIn: ";|&$`\n\r")) != nil { return }
+
         let entry = DictionaryEntry(phrase: phrase, source: .autoDetected)
         guard !entries.contains(where: { $0.phrase.lowercased() == entry.phrase.lowercased() }) else { return }
         entries.append(entry)

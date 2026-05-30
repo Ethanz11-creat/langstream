@@ -72,6 +72,22 @@ struct KeyboardInjector {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
+        // Defer: always restore clipboard on exit (success, throw, or cancellation)
+        defer {
+            if let savedItems = savedItems, !savedItems.isEmpty {
+                pasteboard.clearContents()
+                var newItems: [NSPasteboardItem] = []
+                for (_, dataMap) in savedItems {
+                    let item = NSPasteboardItem()
+                    for (type, data) in dataMap {
+                        item.setData(data, forType: type)
+                    }
+                    newItems.append(item)
+                }
+                pasteboard.writeObjects(newItems)
+            }
+        }
+
         // 3. Post Command+V
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw InjectionError.eventSourceCreationFailed
@@ -96,21 +112,9 @@ struct KeyboardInjector {
         try await Task.sleep(nanoseconds: 5_000_000)
         cmdUp?.post(tap: .cghidEventTap)
 
-        // 4. Wait for paste to complete, then restore clipboard
+        // 4. Wait for paste to complete
         try await Task.sleep(nanoseconds: 500_000_000) // 500ms — give target app time to read clipboard
-
-        pasteboard.clearContents()
-        if let savedItems = savedItems, !savedItems.isEmpty {
-            var newItems: [NSPasteboardItem] = []
-            for (_, dataMap) in savedItems {
-                let item = NSPasteboardItem()
-                for (type, data) in dataMap {
-                    item.setData(data, forType: type)
-                }
-                newItems.append(item)
-            }
-            pasteboard.writeObjects(newItems)
-        }
+        // Clipboard restored by defer above
     }
 
     // MARK: - Keystroke injection (single-line text only)
@@ -119,6 +123,11 @@ struct KeyboardInjector {
         let typeStart = Date()
         defer {
             AppLogger.log("[KeyboardInjector] typeText completed in \(String(format: "%.2f", Date().timeIntervalSince(typeStart)))s")
+        }
+        // Security: cap keystroke injection to prevent unbounded blocking
+        guard text.count <= 100 else {
+            AppLogger.log("[KeyboardInjector] typeText rejected: \(text.count) chars exceeds 100-char cap")
+            throw InjectionError.eventSourceCreationFailed
         }
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw InjectionError.eventSourceCreationFailed

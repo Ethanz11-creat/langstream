@@ -14,6 +14,9 @@ struct RecordingOutput: @unchecked Sendable {
 }
 
 final class AudioRecorder: @unchecked Sendable {
+    // Security: hard cap at 30 minutes of 16kHz Float32 audio (~110 MB)
+    private static let maxRawSamples = 28_800_000 // 16000 Hz * 60 s/min * 30 min
+
     private var engine: AVAudioEngine?
     private nonisolated(unsafe) var amplitudeContinuation: AsyncStream<Float>.Continuation?
 
@@ -208,7 +211,10 @@ final class AudioRecorder: @unchecked Sendable {
                     let frames = Int(convertedBuffer.frameLength)
                     let samplesArray = Array(UnsafeBufferPointer(start: data, count: frames))
                     self.sampleLock.withLock {
-                        self.rawSamples.append(contentsOf: samplesArray)
+                        let remaining = Self.maxRawSamples - self.rawSamples.count
+                        if remaining > 0 {
+                            self.rawSamples.append(contentsOf: samplesArray.prefix(remaining))
+                        }
                     }
 
                     // Yield average amplitude for VU meter

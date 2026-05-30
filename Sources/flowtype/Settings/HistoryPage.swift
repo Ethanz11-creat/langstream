@@ -240,20 +240,34 @@ struct HistoryPage: View {
                 let data = try JSONEncoder().encode(sessions)
                 try data.write(to: url)
             } else {
-                // CSV
+                // CSV with formula injection protection
                 var csv = "Created At,Mode,Duration (s),Final Text\n"
                 for session in sessions {
-                    let date = formatDateFull(session.createdAt)
-                    let mode = session.polishMode.displayName
-                    let duration = session.durationMs.map { String(Double($0) / 1000.0) } ?? ""
-                    let text = session.finalText.replacingOccurrences(of: "\"", with: "\"\"")
-                    csv += "\"\(date)\",\"\(mode)\",\"\(duration)\",\"\(text)\"\n"
+                    let date = sanitizeCSVCell(formatDateFull(session.createdAt))
+                    let mode = sanitizeCSVCell(session.polishMode.displayName)
+                    let duration = sanitizeCSVCell(session.durationMs.map { String(Double($0) / 1000.0) } ?? "")
+                    let text = sanitizeCSVCell(session.finalText)
+                    csv += "\(date),\(mode),\(duration),\(text)\n"
                 }
                 try csv.write(to: url, atomically: true, encoding: .utf8)
             }
         } catch {
             AppLogger.log("[HistoryPage] Export failed: \(error)")
         }
+    }
+
+    private func sanitizeCSVCell(_ value: String) -> String {
+        var sanitized = value.replacingOccurrences(of: "\"", with: "\"\"")
+        // Replace newlines to preserve CSV row structure
+        sanitized = sanitized.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        // Protect against formula injection by prefixing dangerous leading chars
+        if let first = sanitized.first,
+           ["=", "+", "-", "@"].contains(first) || first == "\t" {
+            sanitized = "'" + sanitized
+        }
+        return "\"\(sanitized)\""
     }
 
     private static let fileDateFormatter: DateFormatter = {

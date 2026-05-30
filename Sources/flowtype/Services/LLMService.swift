@@ -78,11 +78,26 @@ actor LLMService {
 
         let phrases = DictionaryStore.shared.enabledPhrases
         if !phrases.isEmpty {
-            let hotwordBlock = "\n\n以下是用户的专有名词词典，请在输出中优先使用这些正确写法：\n" + phrases.joined(separator: "、")
-            if prompt.contains("{{HOTWORDS}}") {
-                prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: hotwordBlock)
+            // Security: sanitize phrases before injecting into prompt
+            let sanitized = phrases.compactMap { phrase -> String? in
+                let trimmed = phrase.trimmingCharacters(in: .whitespaces)
+                guard trimmed.count <= 100 else { return nil }
+                let lower = trimmed.lowercased()
+                let forbidden = ["ignore", "</system>", "```", "<script", "http://", "https://"]
+                for pattern in forbidden {
+                    if lower.contains(pattern) { return nil }
+                }
+                return trimmed
+            }
+            if !sanitized.isEmpty {
+                let hotwordBlock = "\n\n以下是用户的专有名词词典，请在输出中优先使用这些正确写法：\n" + sanitized.joined(separator: "、")
+                if prompt.contains("{{HOTWORDS}}") {
+                    prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: hotwordBlock)
+                } else {
+                    prompt += hotwordBlock
+                }
             } else {
-                prompt += hotwordBlock
+                prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: "")
             }
         } else {
             prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: "")
@@ -124,8 +139,8 @@ actor LLMService {
             return .failure(LLMError.apiError("请在设置中配置 LLM API Key"))
         }
 
-        guard let url = URL(string: "\(provider.baseURL)/chat/completions") else {
-            return .failure(LLMError.invalidResponse)
+        guard let url = validatedAPIURL(baseURL: provider.baseURL) else {
+            return .failure(LLMError.apiError("Invalid Base URL"))
         }
 
         let body: [String: Any] = [
@@ -156,8 +171,9 @@ actor LLMService {
             guard (200...299).contains(httpResponse.statusCode) else {
                 let statusCode = httpResponse.statusCode
                 let errorBody = String(data: data, encoding: .utf8) ?? "(unable to decode error body)"
-                AppLogger.log("[LLMService] testConnection HTTP \(statusCode): \(errorBody.prefix(500))")
-                return .failure(LLMError.apiError("HTTP \(statusCode): \(errorBody.prefix(200))"))
+                let sanitizedBody = sanitizeErrorBody(errorBody)
+                AppLogger.log("[LLMService] testConnection HTTP \(statusCode): \(sanitizedBody)")
+                return .failure(LLMError.apiError("HTTP \(statusCode): \(sanitizedBody)"))
             }
 
             return .success("连接成功")
@@ -244,8 +260,8 @@ actor LLMService {
         timeoutSeconds: UInt64,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
-        guard let url = URL(string: "\(baseURL)/chat/completions") else {
-            throw LLMError.invalidResponse
+        guard let url = validatedAPIURL(baseURL: baseURL) else {
+            throw LLMError.apiError("Invalid Base URL")
         }
 
         let body: [String: Any] = [
@@ -286,8 +302,9 @@ actor LLMService {
                     } catch {
                         errorBody = "(unable to read error body)"
                     }
-                    AppLogger.log("[LLMService] HTTP \(statusCode): \(errorBody.prefix(500))")
-                    throw LLMError.apiError("HTTP \(statusCode): \(errorBody.prefix(200))")
+                    let sanitizedBody = sanitizeErrorBody(errorBody)
+                    AppLogger.log("[LLMService] HTTP \(statusCode): \(sanitizedBody)")
+                    throw LLMError.apiError("HTTP \(statusCode): \(sanitizedBody)")
                 }
 
                 for try await line in bytes.lines {
@@ -319,6 +336,47 @@ actor LLMService {
             group.cancelAll()
         }
     }
+}
+
+// MARK: - Security Helpers
+
+private func sanitizeErrorBody(_ body: String) -> String {
+    var sanitized = body
+    // Redact common API key patterns
+    let patterns = [
+        "sk-[a-zA-Z0-9]{20,}",
+        "sf-[a-zA-Z0-9]{20,}",
+        "Bearer\\s+[a-zA-Z0-9_-]+",
+        "api[-_]?key\\s*[:=]\\s*['\"]?[a-zA-Z0-9]{16,}['\"]?",
+    ]
+    for pattern in patterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            sanitized = regex.stringByReplacingMatches(
+                in: sanitized,
+                options: [],
+                range: NSRange(location: 0, length: sanitized.utf16.count),
+                withTemplate: "[REDACTED]"
+            )
+        }
+    }
+    return String(sanitized.prefix(200))
+}
+
+private func validatedAPIURL(baseURL: String) -> URL? {
+    let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let url = URL(string: trimmed),
+          url.scheme?.lowercased() == "https",
+          let host = url.host, !host.isEmpty,
+          !host.contains("@"),
+          url.user == nil, url.password == nil else {
+        return nil
+    }
+    // Strip any existing path to avoid path traversal, then append /chat/completions
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: true)
+    components?.path = "/chat/completions"
+    components?.query = nil
+    components?.fragment = nil
+    return components?.url
 }
 
 private struct StreamChunk: Codable {

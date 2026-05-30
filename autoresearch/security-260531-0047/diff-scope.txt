@@ -1,0 +1,4186 @@
+diff --git a/Sources/flowtype/Core/Configuration.swift b/Sources/flowtype/Core/Configuration.swift
+index dbe5846..3fd4562 100644
+--- a/Sources/flowtype/Core/Configuration.swift
++++ b/Sources/flowtype/Core/Configuration.swift
+@@ -2,7 +2,7 @@ import Foundation
+ import CoreGraphics
+ 
+ enum TriggerKey: String, Codable, CaseIterable {
+-    case fn, control, option, command
++    case fn, control, option, command, f13, f14, f15, capsLock, rightCommand
+ 
+     var displayName: String {
+         switch self {
+@@ -10,27 +10,79 @@ enum TriggerKey: String, Codable, CaseIterable {
+         case .control: return "Control"
+         case .option: return "Option"
+         case .command: return "Command"
++        case .f13: return "F13"
++        case .f14: return "F14"
++        case .f15: return "F15"
++        case .capsLock: return "Caps Lock"
++        case .rightCommand: return "Right Command"
+         }
+     }
+ 
+-    var cgEventFlag: CGEventFlags {
++    var isModifier: Bool {
++        switch self {
++        case .fn, .control, .option, .command, .rightCommand:
++            return true
++        case .f13, .f14, .f15, .capsLock:
++            return false
++        }
++    }
++
++    var cgEventFlag: CGEventFlags? {
+         switch self {
+         case .fn: return .maskSecondaryFn
+         case .control: return .maskControl
+         case .option: return .maskAlternate
+         case .command: return .maskCommand
++        case .rightCommand: return .maskCommand
++        case .f13, .f14, .f15, .capsLock:
++            return nil
++        }
++    }
++
++    var keyCode: CGKeyCode? {
++        switch self {
++        case .f13: return 105
++        case .f14: return 107
++        case .f15: return 113
++        case .capsLock: return 57
++        case .rightCommand: return 54
++        case .fn, .control, .option, .command:
++            return nil
++        }
++    }
++
++    var symbolName: String {
++        switch self {
++        case .command: return "⌘"
++        case .option: return "⌥"
++        case .control: return "⌃"
++        case .fn: return "Fn"
++        case .rightCommand: return "Right ⌘"
++        default: return displayName
++        }
++    }
++}
++
++enum InteractionMode: String, Codable, CaseIterable {
++    case tapToStart
++    case toggle
++
++    var displayName: String {
++        switch self {
++        case .tapToStart: return "Tap to Start"
++        case .toggle: return "Toggle"
+         }
+     }
+ }
+ 
+-enum ASRStrategy: String, Codable, CaseIterable {
+-    case parallel
+-    case fallback
++enum WhisperLanguage: String, Codable, CaseIterable {
++    case auto, zh, en
+ 
+     var displayName: String {
+         switch self {
+-        case .parallel: return "并行双发，择优选取"
+-        case .fallback: return "主模型优先，失败回退"
++        case .auto: return "自动检测"
++        case .zh: return "中文"
++        case .en: return "English"
+         }
+     }
+ }
+@@ -51,6 +103,37 @@ struct ProviderPreset: Identifiable, Hashable {
+     static let all: [ProviderPreset] = [.siliconFlow, .openAI, .azure, .custom]
+ }
+ 
++// MARK: - LLM Provider
++
++struct LLMProvider: Codable, Equatable, Identifiable {
++    let id: UUID
++    var name: String
++    var provider: String       // preset name: "SiliconFlow", "OpenAI", "Azure", "Custom"
++    var baseURL: String
++    var model: String
++    var isActive: Bool
++
++    init(id: UUID = UUID(), name: String, provider: String, baseURL: String, model: String, isActive: Bool = false) {
++        self.id = id
++        self.name = name
++        self.provider = provider
++        self.baseURL = baseURL
++        self.model = model
++        self.isActive = isActive
++    }
++
++    static func defaultSiliconFlow(id: UUID = UUID(), isActive: Bool = true) -> LLMProvider {
++        LLMProvider(
++            id: id,
++            name: "默认配置",
++            provider: "SiliconFlow",
++            baseURL: "https://api.siliconflow.cn/v1",
++            model: "deepseek-ai/DeepSeek-V3",
++            isActive: isActive
++        )
++    }
++}
++
+ // MARK: - Service Config
+ 
+ struct ServiceConfig: Codable, Equatable {
+@@ -70,75 +153,87 @@ struct ServiceConfig: Codable, Equatable {
+ // MARK: - Configuration
+ 
+ struct Configuration: Codable, Equatable {
+-    // ASR Primary
+-    var asrPrimaryProvider: String
+-    var asrPrimaryBaseURL: String
+-    var asrPrimaryApiKey: String
+-    var asrPrimaryModel: String
+-
+-    // ASR Fallback
+-    var asrFallbackProvider: String
+-    var asrFallbackBaseURL: String
+-    var asrFallbackApiKey: String
+-    var asrFallbackModel: String
++    // ASR
++    var asrLanguage: WhisperLanguage = .zh
+ 
+     // LLM
+-    var llmProvider: String
+-    var llmBaseURL: String
+-    var llmApiKey: String
+-    var llmModel: String
++    var llmProviders: [LLMProvider] = []
++
++    // Backward-compatible computed properties (active provider)
++    var llmProvider: String {
++        get { llmProviders.first(where: \.isActive)?.provider ?? "" }
++        set {
++            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
++            llmProviders[idx].provider = newValue
++        }
++    }
++    var llmBaseURL: String {
++        get { llmProviders.first(where: \.isActive)?.baseURL ?? "" }
++        set {
++            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
++            llmProviders[idx].baseURL = newValue
++        }
++    }
++    var llmModel: String {
++        get { llmProviders.first(where: \.isActive)?.model ?? "" }
++        set {
++            guard let idx = llmProviders.firstIndex(where: \.isActive) else { return }
++            llmProviders[idx].model = newValue
++        }
++    }
++    var llmApiKey: String {
++        get { "" }  // API keys are stored in Keychain, not the struct
++        set {
++            // No-op: API keys are stored in Keychain via ConfigurationStore
++        }
++    }
+ 
+     // Other settings
+-    var triggerKey: TriggerKey
+-    var asrStrategy: ASRStrategy
+-    var dumpAudio: Bool
+-    var enableFillerStrip: Bool
+-    var enableTermCorrection: Bool
++    var triggerKey: TriggerKey = .command
++    var interactionMode: InteractionMode = .tapToStart
++    var dumpAudio: Bool = false
++    var enableFillerStrip: Bool = true
++    var enableTermCorrection: Bool = true
++
++    // Module 2a: Microphone device selection
++    var microphoneDeviceID: String? = nil
++
++    // Module 2b: Onboarding
++    var hasCompletedOnboarding: Bool = false
+ 
+     // Constants
+-    let temperature: Double
+-    let maxTokens: Int
+-    let systemPrompt: String
++    let temperature: Double = 0.3
++    let maxTokens: Int = 2048
++    var systemPrompt: String = """
++    你是一位面向 AI 编码场景的语音指令整理助手。
+ 
+-    // MARK: - Backward Compatibility Accessors
++    用户输入的是语音识别后的原始开发需求，通常存在口语化、重复、断句混乱、识别错误和表达跳跃等问题。你的任务是将其整理成一段清晰、准确、边界明确、适合直接发送给 AI 编码助手的指令文本。
+ 
+-    /// Legacy apiKey — returns LLM apiKey for services that haven't been updated
+-    var apiKey: String {
+-        llmApiKey
+-    }
++    处理时请遵守以下原则：
+ 
+-    /// Legacy baseURL — returns LLM baseURL
+-    var baseURL: String {
+-        llmBaseURL
+-    }
++    1. 修正语音识别错误、错别字和断句问题。
++    2. 删除无意义口头词、重复词和无信息噪音。
++    3. 保持用户原意，不得擅自增加功能、页面、技术实现或需求范围。
++    4. 保留所有关键限制条件，包括：
++    - 修改范围
++    - 不要改动的部分
++    - 优先级
++    - 风格参考
++    - 输出方式
++    5. 将模糊、跳跃的口语整理为自然、清楚、连续的开发指令，但不要强行写成正式文档。
++    6. 如用户表达中包含"先做简单版、局部改、不要重构、只改样式、别动后端"这类边界条件，必须明确保留。
++    7. 不要解释你的处理过程，不要补充建议，不要反问，不要输出多个版本。
++    8. 只输出最终整理后的文本，不要添加任何前缀、说明、引号或客套话。
++    9. 如果输入只包含语气词、口头词、停顿词、无意义重复，或整体上没有可整理的有效内容，例如"嗯""啊""那个""嗯嗯""哦哦"，则不输出任何文字。
++    10. 如果输入信息不足但仍包含少量可保留内容，则只做最小必要修正后输出，不要自行补全。
++    """
+ 
+-    // MARK: - Effective Values (fall back to primary config if fallback is empty)
++    // MARK: - Backward Compatibility Accessors
+ 
+-    var effectiveAsrPrimaryConfig: ServiceConfig {
+-        ServiceConfig(
+-            provider: asrPrimaryProvider,
+-            baseURL: asrPrimaryBaseURL,
+-            apiKey: asrPrimaryApiKey.isEmpty ? llmApiKey : asrPrimaryApiKey,
+-            model: asrPrimaryModel
+-        )
+-    }
++    var apiKey: String { llmApiKey }
++    var baseURL: String { llmBaseURL }
+ 
+-    var effectiveAsrFallbackConfig: ServiceConfig {
+-        let resolvedApiKey: String
+-        if !asrFallbackApiKey.isEmpty {
+-            resolvedApiKey = asrFallbackApiKey
+-        } else if !asrPrimaryApiKey.isEmpty {
+-            resolvedApiKey = asrPrimaryApiKey
+-        } else {
+-            resolvedApiKey = llmApiKey
+-        }
+-        return ServiceConfig(
+-            provider: asrFallbackProvider,
+-            baseURL: asrFallbackBaseURL.isEmpty ? asrPrimaryBaseURL : asrFallbackBaseURL,
+-            apiKey: resolvedApiKey,
+-            model: asrFallbackModel
+-        )
+-    }
++    // MARK: - Effective Values
+ 
+     var effectiveLLMConfig: ServiceConfig {
+         ServiceConfig(
+@@ -151,54 +246,87 @@ struct Configuration: Codable, Equatable {
+ 
+     // MARK: - Default
+ 
+-    static let `default` = Configuration(
+-        asrPrimaryProvider: "SiliconFlow",
+-        asrPrimaryBaseURL: "https://api.siliconflow.cn/v1",
+-        asrPrimaryApiKey: "",
+-        asrPrimaryModel: "TeleAI/TeleSpeechASR",
+-        asrFallbackProvider: "SiliconFlow",
+-        asrFallbackBaseURL: "",
+-        asrFallbackApiKey: "",
+-        asrFallbackModel: "FunAudioLLM/SenseVoiceSmall",
+-        llmProvider: "SiliconFlow",
+-        llmBaseURL: "https://api.siliconflow.cn/v1",
+-        llmApiKey: "",
+-        llmModel: "deepseek-ai/DeepSeek-V3",
+-        triggerKey: .command,
+-        asrStrategy: .parallel,
+-        dumpAudio: false,
+-        enableFillerStrip: true,
+-        enableTermCorrection: true,
+-        temperature: 0.3,
+-        maxTokens: 2048,
+-        systemPrompt: """
+-        你是一位面向 AI 编码场景的语音指令整理助手。
+-
+-        用户输入的是语音识别后的原始开发需求，通常存在口语化、重复、断句混乱、识别错误和表达跳跃等问题。你的任务是将其整理成一段清晰、准确、边界明确、适合直接发送给 AI 编码助手的指令文本。
+-
+-        处理时请遵守以下原则：
+-
+-        1. 修正语音识别错误、错别字和断句问题。
+-        2. 删除无意义口头词、重复词和无信息噪音。
+-        3. 保持用户原意，不得擅自增加功能、页面、技术实现或需求范围。
+-        4. 保留所有关键限制条件，包括：
+-        - 修改范围
+-        - 不要改动的部分
+-        - 优先级
+-        - 风格参考
+-        - 输出方式
+-        5. 将模糊、跳跃的口语整理为自然、清楚、连续的开发指令，但不要强行写成正式文档。
+-        6. 如用户表达中包含"先做简单版、局部改、不要重构、只改样式、别动后端"这类边界条件，必须明确保留。
+-        7. 不要解释你的处理过程，不要补充建议，不要反问，不要输出多个版本。
+-        8. 只输出最终整理后的文本，不要添加任何前缀、说明、引号或客套话。
+-        9. 如果输入只包含语气词、口头词、停顿词、无意义重复，或整体上没有可整理的有效内容，例如"嗯""啊""那个""嗯嗯""哦哦"，则不输出任何文字。
+-        10. 如果输入信息不足但仍包含少量可保留内容，则只做最小必要修正后输出，不要自行补全。
+-        """
+-    )
++    init() {}
++
++    static let `default` = Configuration()
++
++    // MARK: - Backward-Compatible Decoding
++
++    private enum LegacyKeys: String, CodingKey {
++        case whisperLanguage
++    }
++
++    init(from decoder: Decoder) throws {
++        let c = try decoder.container(keyedBy: CodingKeys.self)
++        let legacy = try? decoder.container(keyedBy: LegacyKeys.self)
++        let d = Configuration.default
++        asrLanguage = (try? c.decode(WhisperLanguage.self, forKey: .asrLanguage))
++            ?? (try? legacy?.decode(WhisperLanguage.self, forKey: .whisperLanguage))
++            ?? d.asrLanguage
++        triggerKey = (try? c.decode(TriggerKey.self, forKey: .triggerKey)) ?? d.triggerKey
++        interactionMode = (try? c.decode(InteractionMode.self, forKey: .interactionMode)) ?? d.interactionMode
++        dumpAudio = (try? c.decode(Bool.self, forKey: .dumpAudio)) ?? d.dumpAudio
++        enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
++        enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
++        systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? d.systemPrompt
++        microphoneDeviceID = (try? c.decode(String?.self, forKey: .microphoneDeviceID)) ?? d.microphoneDeviceID
++        hasCompletedOnboarding = (try? c.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? d.hasCompletedOnboarding
++
++        // Try new multi-provider format first
++        if let providers = try? c.decode([LLMProvider].self, forKey: .llmProviders), !providers.isEmpty {
++            llmProviders = providers
++        } else {
++            // Migrate from old single-provider format
++            let oldProvider = (try? c.decode(String.self, forKey: .llmProvider)) ?? d.llmProvider
++            let oldBaseURL = (try? c.decode(String.self, forKey: .llmBaseURL)) ?? d.llmBaseURL
++            let oldModel = (try? c.decode(String.self, forKey: .llmModel)) ?? d.llmModel
++            llmProviders = [LLMProvider(
++                id: UUID(),
++                name: "默认配置",
++                provider: oldProvider,
++                baseURL: oldBaseURL,
++                model: oldModel,
++                isActive: true
++            )]
++        }
++    }
++}
++
++extension Configuration {
++    private enum CodingKeys: String, CodingKey {
++        case asrLanguage
++        case llmProviders
++        case triggerKey
++        case interactionMode
++        case dumpAudio
++        case enableFillerStrip
++        case enableTermCorrection
++        case systemPrompt
++        case microphoneDeviceID
++        case hasCompletedOnboarding
++        // Legacy keys (for migration only, not stored properties)
++        case llmProvider
++        case llmBaseURL
++        case llmModel
++        case llmApiKey
++    }
++
++    func encode(to encoder: Encoder) throws {
++        var container = encoder.container(keyedBy: CodingKeys.self)
++        try container.encode(asrLanguage, forKey: .asrLanguage)
++        try container.encode(llmProviders, forKey: .llmProviders)
++        try container.encode(triggerKey, forKey: .triggerKey)
++        try container.encode(interactionMode, forKey: .interactionMode)
++        try container.encode(dumpAudio, forKey: .dumpAudio)
++        try container.encode(enableFillerStrip, forKey: .enableFillerStrip)
++        try container.encode(enableTermCorrection, forKey: .enableTermCorrection)
++        try container.encode(systemPrompt, forKey: .systemPrompt)
++        try container.encode(microphoneDeviceID, forKey: .microphoneDeviceID)
++        try container.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
++    }
+ }
+ 
+ extension Configuration {
+-    /// Backward-compatible singleton accessor
+     static var shared: Configuration {
+         ConfigurationStore.shared.current
+     }
+diff --git a/Sources/flowtype/Core/DailyStats.swift b/Sources/flowtype/Core/DailyStats.swift
+new file mode 100644
+index 0000000..2cbd529
+--- /dev/null
++++ b/Sources/flowtype/Core/DailyStats.swift
+@@ -0,0 +1,101 @@
++import Foundation
++
++struct DailyStats: Codable, Identifiable {
++    let date: String // "YYYY-MM-DD"
++    var totalDurationMs: UInt64
++    var totalWordCount: Int
++    var sessionCount: Int
++
++    var id: String { date }
++
++    var averageSpeed: Int {
++        let totalMinutes = Double(totalDurationMs) / 1000.0 / 60.0
++        guard totalMinutes > 0 else { return 0 }
++        return Int(Double(totalWordCount) / totalMinutes)
++    }
++}
++
++@MainActor
++final class DailyStatsStore: ObservableObject {
++    static let shared = DailyStatsStore()
++
++    @Published private(set) var stats: [DailyStats] = []
++
++    private let store = PersistentStore<[DailyStats]>(filename: "daily_stats.json")
++    private var saveDebounce: Task<Void, Never>?
++
++    private init() {
++        stats = store.load() ?? []
++    }
++
++    func recordSession(durationMs: UInt64, wordCount: Int) {
++        let date = Self.todayString
++        if let idx = stats.firstIndex(where: { $0.date == date }) {
++            stats[idx].totalDurationMs += durationMs
++            stats[idx].totalWordCount += wordCount
++            stats[idx].sessionCount += 1
++        } else {
++            stats.append(DailyStats(
++                date: date,
++                totalDurationMs: durationMs,
++                totalWordCount: wordCount,
++                sessionCount: 1
++            ))
++        }
++        // Keep last 365 days
++        if stats.count > 365 {
++            stats.removeFirst(stats.count - 365)
++        }
++        scheduleSave()
++    }
++
++    var totalDurationMs: UInt64 {
++        stats.reduce(0) { $0 + $1.totalDurationMs }
++    }
++
++    var totalWordCount: Int {
++        stats.reduce(0) { $0 + $1.totalWordCount }
++    }
++
++    var totalSessionCount: Int {
++        stats.reduce(0) { $0 + $1.sessionCount }
++    }
++
++    var overallAverageSpeed: Int {
++        let totalMinutes = Double(totalDurationMs) / 1000.0 / 60.0
++        guard totalMinutes > 0 else { return 0 }
++        return Int(Double(totalWordCount) / totalMinutes)
++    }
++
++    var estimatedTimeSaved: String {
++        // Assume typing speed of 40 WPM (≈ 200 CPM)
++        let typingMinutes = Double(totalWordCount) / 40.0
++        let speakingMinutes = Double(totalDurationMs) / 1000.0 / 60.0
++        let savedMinutes = max(0, Int(typingMinutes - speakingMinutes))
++        let hours = savedMinutes / 60
++        let minutes = savedMinutes % 60
++        if hours > 0 {
++            return "\(hours) hr \(minutes) min"
++        }
++        return "\(minutes) min"
++    }
++
++    private func scheduleSave() {
++        saveDebounce?.cancel()
++        saveDebounce = Task {
++            try? await Task.sleep(nanoseconds: 500_000_000)
++            guard !Task.isCancelled else { return }
++            self.store.save(self.stats)
++        }
++    }
++
++    private static let dateFormatter: DateFormatter = {
++        let formatter = DateFormatter()
++        formatter.dateFormat = "yyyy-MM-dd"
++        return formatter
++    }()
++
++    private static var todayString: String {
++        dateFormatter.string(from: Date())
++    }
++}
+diff --git a/Sources/flowtype/Core/Dictionary.swift b/Sources/flowtype/Core/Dictionary.swift
+new file mode 100644
+index 0000000..6fd2665
+--- /dev/null
++++ b/Sources/flowtype/Core/Dictionary.swift
+@@ -0,0 +1,100 @@
++import Foundation
++
++enum EntrySource: String, Codable {
++    case manual, autoDetected
++}
++
++struct DictionaryEntry: Codable, Identifiable {
++    let id: String
++    var phrase: String
++    var note: String?
++    var enabled: Bool
++    var hits: UInt64
++    let createdAt: Date
++    var source: EntrySource
++
++    init(phrase: String, note: String? = nil, source: EntrySource = .manual) {
++        self.id = UUID().uuidString
++        self.phrase = phrase.trimmingCharacters(in: .whitespaces)
++        self.note = note
++        self.enabled = true
++        self.hits = 0
++        self.createdAt = Date()
++        self.source = source
++    }
++}
++
++@MainActor
++final class DictionaryStore: ObservableObject {
++    static let shared = DictionaryStore()
++
++    @Published private(set) var entries: [DictionaryEntry] = []
++
++    private let store = PersistentStore<[DictionaryEntry]>(filename: "dictionary.json")
++    private var saveDebounce: Task<Void, Never>?
++
++    private init() {
++        entries = store.load() ?? []
++    }
++
++    func add(phrase: String, note: String? = nil) {
++        guard !phrase.trimmingCharacters(in: .whitespaces).isEmpty else { return }
++        let entry = DictionaryEntry(phrase: phrase.trimmingCharacters(in: .whitespaces), note: note)
++        entries.append(entry)
++        scheduleSave()
++    }
++
++    func addAutoDetected(phrase: String) {
++        guard !phrase.isEmpty else { return }
++        let entry = DictionaryEntry(phrase: phrase, source: .autoDetected)
++        guard !entries.contains(where: { $0.phrase.lowercased() == entry.phrase.lowercased() }) else { return }
++        entries.append(entry)
++        scheduleSave()
++        AppLogger.log("[DictionaryStore] Auto-added: \(entry.phrase)")
++    }
++
++    func remove(id: String) {
++        entries.removeAll { $0.id == id }
++        scheduleSave()
++    }
++
++    func setEnabled(id: String, _ enabled: Bool) {
++        guard let idx = entries.firstIndex(where: { $0.id == id }) else { return }
++        entries[idx].enabled = enabled
++        scheduleSave()
++    }
++
++    func incrementHits(ids: Set<String>) {
++        guard !ids.isEmpty else { return }
++        for i in entries.indices {
++            if ids.contains(entries[i].id) {
++                entries[i].hits += 1
++            }
++        }
++        scheduleSave()
++    }
++
++    func detectHits(in text: String) -> Set<String> {
++        let lower = text.lowercased()
++        var hitIds = Set<String>()
++        for entry in entries where entry.enabled {
++            if lower.contains(entry.phrase.lowercased()) {
++                hitIds.insert(entry.id)
++            }
++        }
++        return hitIds
++    }
++
++    var enabledPhrases: [String] {
++        entries.filter(\.enabled).map(\.phrase)
++    }
++
++    private func scheduleSave() {
++        saveDebounce?.cancel()
++        saveDebounce = Task {
++            try? await Task.sleep(nanoseconds: 500_000_000)
++            guard !Task.isCancelled else { return }
++            self.store.save(self.entries)
++        }
++    }
++}
+diff --git a/Sources/flowtype/Core/PipelineOrchestrator.swift b/Sources/flowtype/Core/PipelineOrchestrator.swift
+index ea44e06..1b2588f 100644
+--- a/Sources/flowtype/Core/PipelineOrchestrator.swift
++++ b/Sources/flowtype/Core/PipelineOrchestrator.swift
+@@ -1,341 +1,616 @@
+ import Foundation
+ import AppKit
++import SwiftUI
++
++// MARK: - Session State
++
++enum SessionState: Equatable {
++    case idle
++    case recording(elapsedSeconds: Int)
++    case processing(provider: String)
++    case polishing(preview: String)
++    case injecting
++    case error(String)
++}
++
++// MARK: - Session Controller
+ 
+ @MainActor
+-final class PipelineOrchestrator {
+-    static let shared: PipelineOrchestrator = {
+-        let instance = PipelineOrchestrator()
+-        return instance
+-    }()
++final class SessionController: ObservableObject {
++    static let shared = SessionController()
+ 
+-    private let appState = AppState()
+     private let audioRecorder = AudioRecorder()
+     private let speechRouter = SpeechRouter()
+-    private let llmService = LLMService(configuration: Configuration.shared)
+-    private lazy var asyncRefiner = AsyncRefiner(speechRouter: speechRouter, llmService: llmService)
++    private let llmService = LLMService()
+     private let appleSpeechProvider = AppleSpeechProvider()
+ 
++    var qwenProvider: QwenASRProvider { speechRouter.qwenProvider }
++
++    // MARK: - Published State
++
++    @Published private(set) var sessionState: SessionState = .idle
++    @Published private(set) var amplitude: Float = 0.0
++    @Published private(set) var previewText: String = ""
++
++    // MARK: - Session Identity
++
++    private var sessionID: UInt64 = 0
++    private var activeSessionID: UInt64 = 0
++    private var useLLMPolish: Bool = false
++
++    // MARK: - Tasks
++
+     private var recordingTask: Task<Void, Never>?
++    private var processingTask: Task<Void, Never>?
++    private var previewStreamTask: Task<Void, Never>?
+ 
+-    /// End-mode detection: single-tap end (raw ASR) vs double-tap end (LLM polish)
+-    var pendingEndModeDetection = false
+-    var useLLMForCurrentSession = false
+-    private var endModeTimer: Timer?
++    // MARK: - Recording Timer
+ 
+-    // MARK: - Segmented ASR state
+-    /// Completed segment ASR results, keyed by insertion order.
+-    private var segmentResults: [Int: String] = [:]
+-    /// Background ASR tasks for each emitted segment.
+-    private var segmentTasks: [Task<Void, Never>] = []
+-    /// Monotonic index for the next segment.
+-    private var nextSegmentIndex = 0
++    private var recordingTimer = CancellableTimer()
++    private var elapsedSeconds: Int = 0
+ 
+-    /// Derived from appState — single source of truth.
+-    var isRecording: Bool { appState.state.isRecordingIndicator }
++    // MARK: - Preview Debounce
+ 
+-    var state: AppState { appState }
++    private var previewDebounceTask: Task<Void, Never>?
++    private var pendingPreviewText: String = ""
+ 
+-    // MARK: - End-Mode Detection
++    // MARK: - Injection Guard
+ 
+-    func beginEndModeDetection() {
+-        pendingEndModeDetection = true
+-        useLLMForCurrentSession = false
+-        endModeTimer?.invalidate()
+-        endModeTimer = Timer.scheduledTimer(timeInterval: 0.35, target: self, selector: #selector(endModeTimerFired), userInfo: nil, repeats: false)
+-    }
++    private var hasInjected: Bool = false
+ 
+-    @objc private func endModeTimerFired() {
+-        if pendingEndModeDetection {
+-            pendingEndModeDetection = false
+-            useLLMForCurrentSession = false
+-            print("[PipelineOrchestrator] End-mode timer expired → single-tap end (raw ASR)")
+-        }
+-    }
++    // MARK: - History Tracking
++
++    private var sessionRawTranscript: String = ""
++    private var sessionFinalText: String = ""
++
++    // MARK: - Error Dismiss
++
++    private var errorDismissTask: Task<Void, Never>?
+ 
+-    func confirmDoubleTapEnd() {
+-        endModeTimer?.invalidate()
+-        endModeTimer = nil
+-        pendingEndModeDetection = false
+-        useLLMForCurrentSession = true
+-        print("[PipelineOrchestrator] Double-tap end confirmed → LLM polish enabled")
++    // MARK: - Diagnostics
++
++    private var recordingStartTime: Date?
++
++    // MARK: - Computed
++
++    var isRecording: Bool {
++        if case .recording = sessionState { return true }
++        return false
+     }
+ 
+-    func toggleRecording() {
+-        if isRecording {
+-            stopRecording()
+-        } else {
+-            startRecording()
+-        }
++    var isProcessing: Bool {
++        if case .processing = sessionState { return true }
++        return false
+     }
+ 
+-    private func startRecording() {
+-        print("[PipelineOrchestrator] startRecording called")
+-        appState.clearTranscription()
+-        segmentResults.removeAll()
+-        segmentTasks.removeAll()
+-        nextSegmentIndex = 0
++    // MARK: - Public API
+ 
+-        // Show window immediately with correct state so UI never shows stale .idle
+-        appState.transition(to: .recording(elapsedSeconds: 0))
+-        WindowManager.shared.showWindow()
++    func startRecording() {
++        let newID = nextSessionID()
++        AppLogger.log("[SessionController#\(newID)] startRecording requested")
+ 
+-        recordingTask = Task { [weak self] in
+-            guard let self = self else { return }
++        switch sessionState {
++        case .idle, .error:
++            break
++        default:
++            AppLogger.log("[SessionController#\(newID)] REJECTED: state=\(sessionState)")
++            return
++        }
+ 
+-            do {
+-                // 1. Check microphone permission (fast path if already granted)
+-                print("[PipelineOrchestrator] Requesting mic permission...")
+-                WindowManager.fileLog("Pipeline: requesting mic permission...")
+-                let granted = await self.audioRecorder.requestPermission()
+-                guard granted else {
+-                    print("[PipelineOrchestrator] Mic permission denied")
+-                    WindowManager.fileLog("Pipeline: mic permission DENIED")
+-                    // Provide actionable guidance for ad-hoc signed builds where the
+-                    // system may silently deny without showing a dialog.
+-                    let status = self.audioRecorder.authorizationStatus()
+-                    if status == 0 {
+-                        self.appState.showError("麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。")
+-                    } else if status == 1 {
+-                        self.appState.showError("麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。")
+-                    } else {
+-                        self.appState.showError("请在系统设置中允许麦克风访问")
+-                    }
+-                    return
+-                }
+-                print("[PipelineOrchestrator] Mic permission granted")
+-                WindowManager.fileLog("Pipeline: mic permission granted")
+-                try Task.checkCancellation()
+-
+-                // 2. Start AudioRecorder
+-                print("[PipelineOrchestrator] Starting AudioRecorder...")
+-                let output = try await self.audioRecorder.startRecording()
+-                print("[PipelineOrchestrator] AudioRecorder started")
+-
+-                // 2.5 Set up real-time AppleSpeech preview (on-device, offline)
+-                self.audioRecorder.onAudioBuffer = { [weak self] buffer in
+-                    self?.appleSpeechProvider.appendAudioBuffer(buffer)
+-                }
+-                let previewStream = self.appleSpeechProvider.startStreamingRecognition()
+-                Task { @MainActor [weak self] in
+-                    guard let self = self else { return }
+-                    for await text in previewStream {
+-                        self.appState.updatePreviewText(text)
+-                    }
+-                }
++        errorDismissTask?.cancel()
++        errorDismissTask = nil
+ 
+-                // 3. Consume segment stream in background — each 60s chunk gets ASR’d immediately
+-                Task { @MainActor [weak self] in
+-                    guard let self = self else { return }
+-                    for await segmentData in output.segments {
+-                        let index = self.nextSegmentIndex
+-                        self.nextSegmentIndex += 1
+-                        print("[PipelineOrchestrator] Received segment #\(index) (\(segmentData.count) bytes), starting ASR...")
+-                        let task = Task { @MainActor [weak self] in
+-                            guard let self = self else { return }
+-                            if let result = await self.asyncRefiner.transcribeWithScoring(audioData: segmentData) {
+-                                self.segmentResults[index] = result.text
+-                                print("[PipelineOrchestrator] Segment #\(index) ASR done: '\(result.text)'")
+-                            } else {
+-                                print("[PipelineOrchestrator] Segment #\(index) ASR failed")
+-                            }
+-                        }
+-                        self.segmentTasks.append(task)
+-                    }
+-                }
++        activeSessionID = newID
++        useLLMPolish = false
++        hasInjected = false
++        recordingStartTime = Date()
++        sessionRawTranscript = ""
++        sessionFinalText = ""
+ 
+-                // 4. Consume amplitude stream (blocks until stream finishes or task cancelled)
+-                print("[PipelineOrchestrator] Waiting for audio stream...")
+-                for await amplitude in output.amplitude {
+-                    try Task.checkCancellation()
+-                    self.appState.updateAmplitude(amplitude)
+-                }
+-                print("[PipelineOrchestrator] Audio stream ended")
++        previewText = ""
++        amplitude = 0.0
++        pendingPreviewText = ""
++        previewDebounceTask?.cancel()
++        previewDebounceTask = nil
+ 
+-            } catch is CancellationError {
+-                print("[PipelineOrchestrator] Recording task cancelled")
+-            } catch {
+-                print("[PipelineOrchestrator] Recording failed: \(error)")
+-                self.appState.showError("录音启动失败: \(error.localizedDescription)")
+-            }
++        sessionState = .recording(elapsedSeconds: 0)
++        startRecordingTimer()
++        WindowManager.shared.showWindow()
++
++        recordingTask = Task { [weak self] in
++            guard let self else { return }
++            await self.runRecordingSession(id: newID)
+         }
+     }
+ 
+-    private func stopRecording() {
+-        print("[PipelineOrchestrator] stopRecording called, currentState=\(appState.state)")
++    func endRecording(withPolish: Bool) {
++        AppLogger.log("[SessionController#\(activeSessionID)] endRecording called, withPolish=\(withPolish)")
+ 
+-        // Defensive: if somehow we're not actually recording, just bail
+         guard isRecording else {
+-            print("[PipelineOrchestrator] stopRecording: not in recording state, bailing")
++            AppLogger.log("[SessionController#\(activeSessionID)] endRecording: not recording, ignoring")
+             return
+         }
+ 
+-        // 1. Stop AudioRecorder — returns completed 60s segments + final partial buffer
+-        print("[PipelineOrchestrator] Stopping AudioRecorder...")
+-        let (_, finalData) = self.audioRecorder.stopRecording()
+-        self.audioRecorder.onAudioBuffer = nil
++        useLLMPolish = withPolish
++        stopRecordingTimer()
++
++        recordingTask?.cancel()
++        recordingTask = nil
++
++        // Flush any pending preview debounce so the final preview text is complete
++        previewDebounceTask?.cancel()
++        previewDebounceTask = nil
++        if !pendingPreviewText.isEmpty {
++            previewText = pendingPreviewText
++        }
++
++        let providerName = speechRouter.qwenProvider.isLoaded ? "Qwen3-ASR" : "AppleSpeech"
++        sessionState = .processing(provider: providerName)
++
++        processingTask = Task { [weak self] in
++            guard let self else { return }
++            await self.runProcessingSession(id: self.activeSessionID)
++        }
++    }
+ 
+-        // Stop AppleSpeech streaming and capture final local result
+-        let localPreviewText = self.appleSpeechProvider.stopStreamingRecognition()
++    func cancel() {
++        AppLogger.log("[SessionController#\(activeSessionID)] cancel called, state=\(sessionState)")
+ 
+         recordingTask?.cancel()
+         recordingTask = nil
++        processingTask?.cancel()
++        processingTask = nil
++        previewStreamTask?.cancel()
++        previewStreamTask = nil
++
++        audioRecorder.onAudioBuffer = nil
++        audioRecorder.onRecordingFrozen = nil
++        audioRecorder.stopRecording()
++        _ = appleSpeechProvider.stopStreamingRecognition()
++
++        resetToIdle()
++        AppLogger.log("[SessionController] Cancelled — session reset to idle")
++    }
++
++    // MARK: - Recording Phase
+ 
+-        // All remaining work is async: ASR, polish, injection.
+-        Task { [weak self] in
+-            guard let self = self else {
+-                print("[PipelineOrchestrator] Self deallocated during post-processing")
++    private func runRecordingSession(id: UInt64) async {
++        AppLogger.log("[SessionController#\(id)] Recording phase started")
++        let recordingStart = Date()
++
++        defer {
++            let elapsed = Date().timeIntervalSince(recordingStart)
++            AppLogger.log("[SessionController#\(id)] Recording phase ended (duration: \(String(format: "%.1f", elapsed))s)")
++        }
++
++        do {
++            let granted = await audioRecorder.requestPermission()
++            guard granted else {
++                let status = audioRecorder.authorizationStatus()
++                let msg = micPermissionMessage(status: status)
++                showError(msg)
++                AppLogger.log("[SessionController#\(id)] Mic permission denied (status=\(status))")
+                 return
+             }
++            try checkCancellation(id: id)
+ 
+-            // 2. Wait for all in-flight segment ASR tasks to complete
+-            print("[PipelineOrchestrator] Waiting for \(self.segmentTasks.count) segment ASR tasks...")
+-            for task in self.segmentTasks {
+-                await task.value
+-            }
+-            print("[PipelineOrchestrator] All segment ASR tasks completed")
++            let deviceID = ConfigurationStore.shared.current.microphoneDeviceID
++            let output = try await audioRecorder.startRecording(deviceID: deviceID)
++            AppLogger.log("[SessionController#\(id)] AudioRecorder started")
+ 
+-            // 3. Build ordered text from completed segments
+-            let orderedSegmentTexts = (0..<self.nextSegmentIndex).compactMap { self.segmentResults[$0] }
+-            let combinedSegmentText = SegmentMerger.merge(orderedSegmentTexts)
+-            if !orderedSegmentTexts.isEmpty {
+-                print("[PipelineOrchestrator] Combined \(orderedSegmentTexts.count) segments (deduplicated)")
++            // AppleSpeech real-time preview
++            audioRecorder.onAudioBuffer = { [weak self] buffer in
++                self?.appleSpeechProvider.appendAudioBuffer(buffer)
++            }
++            let previewStream = await appleSpeechProvider.startStreamingRecognition()
++            AppLogger.log("[SessionController#\(id)] AppleSpeech preview started")
++
++            self.previewStreamTask = Task { @MainActor [weak self] in
++                guard let self else { return }
++                for await text in previewStream {
++                    guard self.activeSessionID == id else { break }
++                    self.updatePreviewText(text)
++                }
+             }
+ 
+-            // 4. ASR the final partial buffer
+-            var finalASRText = ""
+-            if let finalData = finalData, !finalData.isEmpty {
+-                let wavHeaderSize = 44
+-                let audioPayloadSize = finalData.count - wavHeaderSize
+-                let estimatedDuration = Double(audioPayloadSize) / 32000.0
+-                print("[PipelineOrchestrator] Final audio: \(finalData.count) bytes, ~\(String(format: "%.1f", estimatedDuration))s")
+-
+-                self.appState.transition(to: .processingASR(provider: "云端识别"))
+-                if let result = await self.asyncRefiner.transcribeWithScoring(audioData: finalData) {
+-                    finalASRText = result.text
+-                    print("[PipelineOrchestrator] Final segment ASR: '\(finalASRText)'")
+-                } else {
+-                    print("[PipelineOrchestrator] Final segment ASR failed")
++            AppLogger.log("[SessionController#\(id)] Recording in progress")
++            for await amp in output.amplitude {
++                try checkCancellation(id: id)
++                if abs(self.amplitude - amp) > 0.005 {
++                    self.amplitude = amp
+                 }
+-            } else {
+-                print("[PipelineOrchestrator] No final audio data")
+             }
++            AppLogger.log("[SessionController#\(id)] Audio amplitude stream ended")
++
++        } catch is CancellationError {
++            AppLogger.log("[SessionController#\(id)] Recording cancelled")
++        } catch {
++            AppLogger.log("[SessionController#\(id)] Recording failed: \(error)")
++            showError("录音启动失败: \(error.localizedDescription)")
++        }
++    }
+ 
+-            // 5. Combine all ASR results
+-            var fullASRText = [combinedSegmentText, finalASRText]
+-                .filter { !$0.isEmpty }
+-                .joined(separator: "\n")
++    // MARK: - Processing Phase
+ 
+-            // Fallback to AppleSpeech local result if cloud ASR produced nothing
+-            if fullASRText.isEmpty, !localPreviewText.isEmpty {
+-                print("[PipelineOrchestrator] Cloud ASR empty, using AppleSpeech local preview")
+-                fullASRText = localPreviewText
++    private func runProcessingSession(id: UInt64) async {
++        AppLogger.log("[SessionController#\(id)] Processing phase started")
++        let processingStartTime = Date()
++
++        defer {
++            let totalProcessingTime = Date().timeIntervalSince(processingStartTime)
++            if let recStart = recordingStartTime {
++                let totalSessionTime = Date().timeIntervalSince(recStart)
++                AppLogger.log("[SessionController#\(id)] ===== TIMING SUMMARY =====")
++                AppLogger.log("[SessionController#\(id)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
++                AppLogger.log("[SessionController#\(id)] Processing time: \(String(format: "%.1f", totalProcessingTime))s")
+             }
++            AppLogger.log("[SessionController#\(id)] Processing phase ended (total: \(String(format: "%.1f", totalProcessingTime))s)")
++        }
++
++        let stopAudioStart = Date()
++        audioRecorder.stopRecording()
++        audioRecorder.onAudioBuffer = nil
++        audioRecorder.onRecordingFrozen = nil
++        AppLogger.log("[SessionController#\(id)] AudioRecorder stopped in \(String(format: "%.2f", Date().timeIntervalSince(stopAudioStart)))s")
++
++        let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
++        AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: '\(localPreviewText.prefix(80))'")
++
++        let rawSamples = audioRecorder.takeAccumulatedSamples()
++        let audioDuration = Double(rawSamples.count) / 16000.0
++        AppLogger.log("[SessionController#\(id)] Raw samples: \(rawSamples.count) (\(String(format: "%.1f", audioDuration))s)")
+ 
+-            guard !fullASRText.isEmpty else {
+-                print("[PipelineOrchestrator] Combined ASR text is empty")
+-                self.appState.showError("语音识别结果为空")
+-                WindowManager.shared.hide()
+-                self.appState.transition(to: .idle)
+-                // Clean up state
+-                self.segmentResults.removeAll()
+-                self.segmentTasks.removeAll()
+-                self.nextSegmentIndex = 0
++        var finalASRText = ""
++
++        if speechRouter.qwenProvider.isLoaded && !rawSamples.isEmpty {
++            AppLogger.log("[SessionController#\(id)] Using Qwen3-ASR batch transcription")
++            sessionState = .processing(provider: "Qwen3-ASR")
++
++            let asrStart = Date()
++            do {
++                finalASRText = try await speechRouter.qwenProvider.transcribe(
++                    samples: rawSamples,
++                    language: nil,
++                    context: nil
++                )
++                AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: '\(finalASRText.prefix(200))'")
++                guard activeSessionID == id else {
++                    AppLogger.log("[SessionController#\(id)] Session changed after transcription, discarding result")
++                    throw CancellationError()
++                }
++            } catch is CancellationError {
++                AppLogger.log("[SessionController#\(id)] Qwen3-ASR cancelled")
++                resetToIdle()
+                 return
++            } catch {
++                AppLogger.log("[SessionController#\(id)] Qwen3-ASR failed: \(error)")
++                finalASRText = ""
+             }
++        }
+ 
+-            // 6. Post-process combined ASR text
+-            let processedText = ASRPostProcessor.process(fullASRText)
+-            let didChange = processedText != fullASRText
+-            if didChange {
+-                print("[PipelineOrchestrator] Post-processed: '\(fullASRText)' -> '\(processedText)'")
+-            }
++        if finalASRText.isEmpty, !localPreviewText.isEmpty {
++            AppLogger.log("[SessionController#\(id)] Using AppleSpeech preview as fallback")
++            finalASRText = localPreviewText
++        }
+ 
+-            let finalText: String
+-            if processedText.isEmpty {
+-                print("[PipelineOrchestrator] Post-processed text is empty, falling back to raw ASR text")
+-                finalText = fullASRText.trimmingCharacters(in: .whitespaces)
+-            } else {
+-                finalText = processedText
+-            }
++        let postProcessStart = Date()
++        let processedText = ASRPostProcessor.process(finalASRText)
++        let textToUse = processedText.isEmpty ? finalASRText.trimmingCharacters(in: .whitespaces) : processedText
++        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: '\(textToUse.prefix(200))'")
+ 
+-            // 7. Display recognized text in capsule (local rendering)
+-            self.appState.recognizedText = finalText
+-            self.appState.previewText = finalText
+-            print("[PipelineOrchestrator] Recognized combined text: '\(finalText)'")
+-
+-            // 8. Wait for end-mode detection to complete (if still pending)
+-            if self.pendingEndModeDetection {
+-                print("[PipelineOrchestrator] Waiting for end-mode detection...")
+-                let startTime = Date()
+-                while self.pendingEndModeDetection && Date().timeIntervalSince(startTime) < 0.4 {
+-                    try? await Task.sleep(nanoseconds: 50_000_000)
++        guard !textToUse.isEmpty else {
++            AppLogger.log("[SessionController#\(id)] Empty text, aborting")
++            showError("语音识别结果为空")
++            resetToIdle()
++            return
++        }
++
++        sessionRawTranscript = textToUse
++
++        if useLLMPolish {
++            let polishStart = Date()
++            sessionState = .polishing(preview: "")
++
++            let composedPrompt = LLMService.composeSystemPrompt(
++                fallback: ConfigurationStore.shared.current.systemPrompt
++            )
++
++            var polishedText: String? = nil
++            do {
++                let stream = await llmService.polishText(textToUse, systemPrompt: composedPrompt)
++                var accumulated = ""
++                for try await chunk in stream {
++                    guard activeSessionID == id else { throw CancellationError() }
++                    accumulated += chunk
++                    sessionState = .polishing(preview: accumulated)
++                }
++                if !accumulated.isEmpty && accumulated != textToUse {
++                    polishedText = accumulated
++                    AppLogger.log("[SessionController#\(id)] LLM polished in \(String(format: "%.1f", Date().timeIntervalSince(polishStart)))s: '\(accumulated.prefix(100))'")
++                } else {
++                    AppLogger.log("[SessionController#\(id)] LLM returned empty/same, using raw")
+                 }
+-                print("[PipelineOrchestrator] End-mode detection complete, useLLM=\(self.useLLMForCurrentSession)")
++            } catch is CancellationError {
++                AppLogger.log("[SessionController#\(id)] LLM polish cancelled")
++                resetToIdle()
++                return
++            } catch {
++                AppLogger.log("[SessionController#\(id)] LLM polish failed: \(error)")
++                sessionState = .polishing(preview: "⚠️ 润色失败，使用原始文本")
++                try? await Task.sleep(nanoseconds: 800_000_000)
+             }
+ 
+-            // 9. Determine text to inject based on end mode
+-            let textToInject: String
+-            print("[PipelineOrchestrator] useLLMForCurrentSession=\(self.useLLMForCurrentSession)")
+-            if self.useLLMForCurrentSession {
+-                // Double-tap end: LLM polish path (polish the *combined* text)
+-                self.appState.transition(to: .polishing(preview: ""))
+-                print("[PipelineOrchestrator] *** DOUBLE-TAP END: starting LLM polish ***")
+-                do {
+-                    let stream = await self.llmService.polishText(finalText)
+-                    var polished = ""
+-                    for try await chunk in stream {
+-                        polished += chunk
+-                        self.appState.updatePolishingPreview(polished)
+-                    }
+-                    if !polished.isEmpty && polished != finalText {
+-                        textToInject = polished
+-                        self.appState.recognizedText = polished
+-                        self.appState.previewText = polished
+-                        print("[PipelineOrchestrator] *** LLM polished: '\(polished)' ***")
+-                    } else {
+-                        print("[PipelineOrchestrator] LLM polish returned empty/same, using raw text")
+-                        textToInject = finalText
+-                    }
+-                } catch {
+-                    print("[PipelineOrchestrator] LLM polish failed: \(error)")
+-                    textToInject = finalText
++            let finalText = polishedText ?? textToUse
++            await injectText(finalText, sessionID: id)
++        } else {
++            AppLogger.log("[SessionController#\(id)] Using raw ASR text (single-tap end)")
++            await injectText(textToUse, sessionID: id)
++        }
++    }
++
++    // MARK: - Injection Phase
++
++    private func injectText(_ text: String, sessionID: UInt64) async {
++        guard !hasInjected else {
++            AppLogger.log("[SessionController#\(sessionID)] Duplicate injection blocked")
++            resetToIdle()
++            return
++        }
++        hasInjected = true
++        AppLogger.log("[SessionController#\(sessionID)] Injection phase started")
++        let injectStart = Date()
++
++        sessionState = .injecting
++        WindowManager.shared.hide()
++
++        try? await Task.sleep(nanoseconds: 100_000_000)
++
++        guard activeSessionID == sessionID else {
++            AppLogger.log("[SessionController#\(sessionID)] Session changed before injection, aborting")
++            resetToIdle()
++            return
++        }
++
++        do {
++            try await KeyboardInjector.insertText(text)
++            AppLogger.log("[SessionController#\(sessionID)] Text injected successfully in \(String(format: "%.2f", Date().timeIntervalSince(injectStart)))s")
++        } catch {
++            AppLogger.log("[SessionController#\(sessionID)] Injection failed: \(error)")
++            NSPasteboard.general.clearContents()
++            NSPasteboard.general.setString(text, forType: .string)
++            showError("已复制到剪贴板")
++            resetToIdle()
++            return
++        }
++
++        saveHistory(finalText: text)
++
++        resetToIdle()
++        if let recStart = recordingStartTime {
++            let totalSessionTime = Date().timeIntervalSince(recStart)
++            AppLogger.log("[SessionController#\(sessionID)] ===== SESSION COMPLETE =====")
++            AppLogger.log("[SessionController#\(sessionID)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
++        }
++    }
++
++    // MARK: - Timer
++
++    private func startRecordingTimer() {
++        elapsedSeconds = 0
++        let maxDuration = ConfigurationStore.shared.current.maxRecordingDuration
++        recordingTimer.schedule(withTimeInterval: 1.0, repeats: true) { [weak self] in
++            Task { @MainActor [weak self] in
++                guard let self, self.isRecording else { return }
++                self.elapsedSeconds += 1
++                self.sessionState = .recording(elapsedSeconds: self.elapsedSeconds)
++
++                // Auto-stop at max duration
++                if self.elapsedSeconds >= maxDuration {
++                    AppLogger.log("[SessionController] Recording reached max duration (\(maxDuration)s), auto-stopping")
++                    self.endRecording(withPolish: false)
+                 }
+-            } else {
+-                // Single-tap end: raw ASR text (concatenated from all segments)
+-                textToInject = finalText
+-                print("[PipelineOrchestrator] *** SINGLE-TAP END: injecting raw ASR text ***")
+             }
++        }
++    }
+ 
+-            // Reset end-mode flags
+-            self.pendingEndModeDetection = false
+-            self.useLLMForCurrentSession = false
++    private func stopRecordingTimer() {
++        recordingTimer.cancel()
++        elapsedSeconds = 0
++    }
+ 
+-            // Clean up segment state
+-            self.segmentResults.removeAll()
+-            self.segmentTasks.removeAll()
+-            self.nextSegmentIndex = 0
++    // MARK: - Preview Debounce
+ 
+-            // 10. Hide window before injection so focus returns to previous app
+-            WindowManager.shared.hide()
+-            // Give OS time to switch focus back to the target app
+-            try? await Task.sleep(nanoseconds: 80_000_000)
++    private func updatePreviewText(_ text: String) {
++        if case .recording = sessionState, text.isEmpty, !previewText.isEmpty {
++            return
++        }
++        guard text != pendingPreviewText else { return }
++        pendingPreviewText = text
+ 
+-            // 11. Inject final text
+-            self.appState.transition(to: .injecting)
+-            print("[PipelineOrchestrator] Injecting '\(textToInject)'...")
++        if previewText.isEmpty, !text.isEmpty {
++            previewText = text
++            return
++        }
++
++        previewDebounceTask?.cancel()
++        previewDebounceTask = Task { [weak self] in
+             do {
+-                try await KeyboardInjector.insertText(textToInject)
+-                print("[PipelineOrchestrator] Text injected successfully")
+-            } catch {
+-                print("[PipelineOrchestrator] Injection failed: \(error)")
+-                NSPasteboard.general.clearContents()
+-                NSPasteboard.general.setString(textToInject, forType: .string)
+-                self.appState.showError("已复制到剪贴板")
++                try await Task.sleep(nanoseconds: 250_000_000)
++            } catch { return }
++            guard let self else { return }
++            self.previewText = self.pendingPreviewText
++            self.previewDebounceTask = nil
++        }
++    }
++
++    // MARK: - Error
++
++    private func showError(_ message: String) {
++        let errorSessionID = activeSessionID
++        sessionState = .error(message)
++        WindowManager.shared.showWindow()
++        errorDismissTask?.cancel()
++        errorDismissTask = Task { @MainActor [weak self] in
++            do {
++                try await Task.sleep(nanoseconds: 3_000_000_000)
++            } catch { return }
++            guard let self else { return }
++            if case .error = self.sessionState, self.activeSessionID == errorSessionID {
++                self.resetToIdle()
+             }
++        }
++    }
++
++    // MARK: - History
++
++    private func saveHistory(finalText: String) {
++        let durationMs: UInt64?
++        if let recStart = recordingStartTime {
++            durationMs = UInt64(Date().timeIntervalSince(recStart) * 1000)
++        } else {
++            durationMs = nil
++        }
++        let mode: PolishMode = useLLMPolish ? (StylePackStore.shared.activePack?.baseMode ?? .structured) : .raw
++        let session = DictationSession(
++            rawTranscript: sessionRawTranscript,
++            finalText: finalText,
++            polishMode: mode,
++            durationMs: durationMs
++        )
++        HistoryStore.shared.append(session)
++
++        // Auto-detect corrections for dictionary (off main thread)
++        if sessionRawTranscript != finalText {
++            let raw = sessionRawTranscript
++            let polished = finalText
++            Task { @MainActor in
++                detectAndAddCorrections(raw: raw, final: polished)
++            }
++        }
++
++        let hitIds = DictionaryStore.shared.detectHits(in: finalText)
++        DictionaryStore.shared.incrementHits(ids: hitIds)
++
++        AppLogger.log("[SessionController] History saved, dict hits: \(hitIds.count)")
++    }
++
++    private func detectAndAddCorrections(raw: String, final: String) {
++        // Simple word-level diff: find words in final that are not in raw
++        let rawWords = raw.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
++        let finalWords = final.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
++
++        let rawSet = Set(rawWords.map { $0.lowercased() })
++        for word in finalWords where word.count >= 2 {
++            let lower = word.lowercased()
++            if !rawSet.contains(lower) {
++                DictionaryStore.shared.addAutoDetected(phrase: word)
++            }
++        }
++    }
++
++    // MARK: - Reset
++
++    private func resetToIdle() {
++        sessionState = .idle
++        activeSessionID = 0
++        useLLMPolish = false
++        hasInjected = false
++        recordingStartTime = nil
++        previewText = ""
++        amplitude = 0.0
++        pendingPreviewText = ""
++        recordingTask?.cancel()
++        recordingTask = nil
++        processingTask?.cancel()
++        processingTask = nil
++        previewDebounceTask?.cancel()
++        previewDebounceTask = nil
++        previewStreamTask?.cancel()
++        previewStreamTask = nil
++        errorDismissTask?.cancel()
++        errorDismissTask = nil
++        stopRecordingTimer()
++        WindowManager.shared.hide()
++    }
++
++    // MARK: - Helpers
++
++    private func nextSessionID() -> UInt64 {
++        sessionID += 1
++        return sessionID
++    }
++
++    private func checkCancellation(id: UInt64) throws {
++        guard activeSessionID == id else {
++            throw CancellationError()
++        }
++        try Task.checkCancellation()
++    }
++
++    private func micPermissionMessage(status: Int) -> String {
++        if status == 0 {
++            return "麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。"
++        } else if status == 1 {
++            return "麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。"
++        } else {
++            return "请在系统设置中允许麦克风访问"
++        }
++    }
++}
++
++// MARK: - SessionState UI Properties
++
++extension SessionState {
++
++    var iconName: String {
++        switch self {
++        case .idle:       return "mic"
++        case .recording:  return "waveform"
++        case .processing: return "brain.head.profile"
++        case .polishing:  return "sparkles"
++        case .injecting:  return "keyboard"
++        case .error:      return "exclamationmark.triangle"
++        }
++    }
++
++    var statusColor: Color {
++        switch self {
++        case .idle:       return Color.white.opacity(0.5)
++        case .recording:  return Color(red: 0.5, green: 0.3, blue: 1.0)
++        case .processing: return .blue
++        case .polishing:  return Color(red: 0.8, green: 0.4, blue: 0.9)
++        case .injecting:  return .green
++        case .error:      return .red
++        }
++    }
++
++    var statusTitle: String {
++        switch self {
++        case .idle:                      return "准备就绪"
++        case .recording:                 return "Listening..."
++        case .processing(let provider):  return "\(provider)..."
++        case .polishing:                 return "润色中..."
++        case .injecting:                 return "输入中..."
++        case .error:                     return "出错了"
++        }
++    }
++
++    var isRecordingIndicator: Bool {
++        if case .recording = self { return true }
++        return false
++    }
++
++    var showSpinner: Bool {
++        switch self {
++        case .processing, .polishing: return true
++        default: return false
++        }
++    }
+ 
+-            // Hide window after everything completes
+-            WindowManager.shared.hide()
+-            self.appState.transition(to: .idle)
++    var showPanel: Bool {
++        switch self {
++        case .idle: return false
++        default: return true
+         }
+     }
+ }
+diff --git a/Sources/flowtype/Services/AudioRecorder.swift b/Sources/flowtype/Services/AudioRecorder.swift
+index 22fdcaa..877b40b 100644
+--- a/Sources/flowtype/Services/AudioRecorder.swift
++++ b/Sources/flowtype/Services/AudioRecorder.swift
+@@ -11,21 +11,17 @@ enum AudioRecorderError: Error, Equatable {
+ struct RecordingOutput: @unchecked Sendable {
+     /// VU-meter amplitude stream (for UI animation).
+     let amplitude: AsyncStream<Float>
+-    /// Audio segment stream: each Data is a complete WAV file (16kHz mono 16-bit).
+-    /// Emitted whenever the 60s buffer fills up; the final partial segment is
+-    /// NOT emitted here — it is returned by `stopRecording()`.
+-    let segments: AsyncStream<Data>
+ }
+ 
+ final class AudioRecorder: @unchecked Sendable {
+-    // NOTE: Create a fresh engine for each session to avoid state issues.
+     private var engine: AVAudioEngine?
+-    private nonisolated(unsafe) var audioBuffer: AVAudioPCMBuffer?
+     private nonisolated(unsafe) var amplitudeContinuation: AsyncStream<Float>.Continuation?
+-    private nonisolated(unsafe) var segmentContinuation: AsyncStream<Data>.Continuation?
+ 
+-    // Recording state — protected by stateLock because accessed from both
+-    // main thread (start/stop) and audio tap callback thread.
++    // Raw sample accumulator for batch ASR (Qwen3-ASR)
++    private var rawSamples: [Float] = []
++    private let sampleLock = OSAllocatedUnfairLock()
++
++    // Recording state
+     private let stateLock = OSAllocatedUnfairLock()
+     private var _isRecording = false
+     private var _isStopping = false
+@@ -37,56 +33,101 @@ final class AudioRecorder: @unchecked Sendable {
+         stateLock.withLock { _isStopping }
+     }
+ 
++    // Original default input device to restore after recording
++    private nonisolated(unsafe) var originalDeviceID: AudioObjectID = kAudioObjectUnknown
++
+     // Diagnostics
+-    private nonisolated(unsafe) var tapCallCount = 0
++    private struct HeartbeatState {
++        var tapCallCount = 0
++        var lastTapCallCount = 0
++        var lastTapTimestamp: Date?
++    }
++    private let heartbeatLock = OSAllocatedUnfairLock<HeartbeatState>(uncheckedState: HeartbeatState())
+ 
+-    /// Optional callback to forward real-time audio buffers to a streaming recognizer.
+-    /// Called on the audio tap thread with the converted 16kHz mono float32 buffer.
++    /// Callback to forward real-time audio buffers to a streaming recognizer.
+     var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
+ 
+-    /// Check current microphone permission status without triggering a dialog.
+-    /// Returns raw value: 0=undetermined, 1=denied, 2=granted
++    /// Called when no audio tap callbacks have been received for a while.
++    var onRecordingFrozen: (() -> Void)?
++
++    // MARK: - Heartbeat detection
++    private var heartbeatTimer = CancellableTimer()
++    private let heartbeatInterval: TimeInterval = 2.0
++    private let heartbeatTimeout: TimeInterval = 5.0
++
+     func authorizationStatus() -> Int {
+         AVAudioApplication.shared.recordPermission.rawValue
+     }
+ 
+-    /// Request microphone permission. On macOS with ad-hoc signing, the system
+-    /// may silently deny without showing a dialog. Callers should check status
+-    /// afterward and guide the user to System Settings if needed.
+     func requestPermission() async -> Bool {
+         let status = AVAudioApplication.shared.recordPermission
+-        // macOS uses FourCC values ('undt', 'deny', 'grnt'), not 0/1/2.
+-        // Compare enum cases directly instead of rawValue.
+-        WindowManager.fileLog("AudioRecorder: mic status = \(status) (undetermined/denied/granted)")
+-
+-        // Only request if undetermined; if already denied, don't re-prompt
++        AppLogger.log("AudioRecorder: mic status = \(status) (undetermined/denied/granted)")
+         guard status == .undetermined else {
+-            WindowManager.fileLog("AudioRecorder: mic status is not undetermined, skipping request")
++            AppLogger.log("AudioRecorder: mic status is not undetermined, skipping request")
+             return status == .granted
+         }
+-
+         let granted = await withCheckedContinuation { continuation in
+             AVAudioApplication.requestRecordPermission { granted in
+                 continuation.resume(returning: granted)
+             }
+         }
+-        WindowManager.fileLog("AudioRecorder: mic request result = \(granted)")
++        AppLogger.log("AudioRecorder: mic request result = \(granted)")
+         return granted
+     }
+ 
+-    // nonisolated — ensures installTap closure is NOT created on @MainActor
+-    nonisolated func startRecording() async throws -> RecordingOutput {
++    nonisolated func startRecording(deviceID: String? = nil) async throws -> RecordingOutput {
+         guard await requestPermission() else {
+             throw AudioRecorderError.permissionDenied
+         }
+ 
+-        // Fresh engine for each session
+         let freshEngine = AVAudioEngine()
+         self.engine = freshEngine
+ 
++        // Route to specific device if requested
++        if let requestedDeviceID = deviceID {
++            if let audioDeviceID = AudioDeviceEnumerator.findDeviceID(uid: requestedDeviceID) {
++                AppLogger.log("[AudioRecorder] Routing to device: \(requestedDeviceID)")
++                // Save original default device
++                var propertyAddress = AudioObjectPropertyAddress(
++                    mSelector: kAudioHardwarePropertyDefaultInputDevice,
++                    mScope: kAudioObjectPropertyScopeGlobal,
++                    mElement: kAudioObjectPropertyElementMain
++                )
++                var originalSize = UInt32(MemoryLayout<AudioObjectID>.size)
++                let originalResult = AudioObjectGetPropertyData(
++                    AudioObjectID(kAudioObjectSystemObject),
++                    &propertyAddress,
++                    0,
++                    nil,
++                    &originalSize,
++                    &originalDeviceID
++                )
++                if originalResult != noErr {
++                    AppLogger.log("[AudioRecorder] Failed to save original device: \(originalResult)")
++                    originalDeviceID = kAudioObjectUnknown
++                }
++                // Set requested device
++                var deviceIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
++                var mutableAudioDeviceID = audioDeviceID
++                let setResult = AudioObjectSetPropertyData(
++                    AudioObjectID(kAudioObjectSystemObject),
++                    &propertyAddress,
++                    0,
++                    nil,
++                    deviceIDSize,
++                    &mutableAudioDeviceID
++                )
++                if setResult != noErr {
++                    AppLogger.log("[AudioRecorder] Failed to set default input device: \(setResult), falling back")
++                    originalDeviceID = kAudioObjectUnknown
++                }
++            } else {
++                AppLogger.log("[AudioRecorder] Requested device \(requestedDeviceID) not found, using default")
++            }
++        }
++
+         let inputNode = freshEngine.inputNode
+         let inputFormat = inputNode.outputFormat(forBus: 0)
+-
+         print("[AudioRecorder] Hardware input format: \(inputFormat)")
+ 
+         guard let format = AVAudioFormat(
+@@ -102,39 +143,48 @@ final class AudioRecorder: @unchecked Sendable {
+             throw AudioRecorderError.formatCreationFailed
+         }
+ 
+-        audioBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000 * 60)!
+         stateLock.withLock {
+             _isRecording = true
+             _isStopping = false
+         }
+-        tapCallCount = 0
+-
+-        // Segment stream — emitted when 60s buffer rolls over
+-        let segmentStream = AsyncStream<Data> { continuation in
+-            self.segmentContinuation = continuation
++        heartbeatLock.withLock { state in
++            state.tapCallCount = 0
++            state.lastTapCallCount = 0
++            state.lastTapTimestamp = Date()
++        }
++        sampleLock.withLock {
++            rawSamples.removeAll(keepingCapacity: true)
++        }
++        heartbeatTimer.schedule(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] in
++            guard let self = self else { return }
++            guard self.isRecording && !self.isStopping else { return }
++            let (currentCount, lastCount, lastTimestamp) = self.heartbeatLock.withLock { state in
++                (state.tapCallCount, state.lastTapCallCount, state.lastTapTimestamp)
++            }
++            let now = Date()
++            if currentCount > lastCount {
++                self.heartbeatLock.withLock { state in
++                    state.lastTapCallCount = currentCount
++                    state.lastTapTimestamp = now
++                }
++            } else if let lastTap = lastTimestamp, now.timeIntervalSince(lastTap) > self.heartbeatTimeout {
++                guard self.isRecording && !self.isStopping else { return }
++                print("[AudioRecorder] HEARTBEAT FAILURE: No tap callbacks for \(self.heartbeatTimeout)s. Auto-stopping.")
++                self.heartbeatTimer.cancel()
++                self.onRecordingFrozen?()
++            }
+         }
+ 
+-        // Amplitude stream — VU meter
+         let amplitudeStream = AsyncStream<Float> { continuation in
+             self.amplitudeContinuation = continuation
+ 
+             inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
+-                guard let self = self else {
+-                    print("[AudioRecorder] Tap callback: self is nil")
+-                    return
+-                }
+-                guard self.isRecording || self.isStopping else {
+-                    return
+-                }
++                guard let self = self else { return }
++                guard self.isRecording || self.isStopping else { return }
+ 
+-                self.tapCallCount += 1
+-                let callIndex = self.tapCallCount
+-                let inputFrames = Int(buffer.frameLength)
+-                print("[AudioRecorder] Tap #\(callIndex) fired: inputFrames=\(inputFrames), time=\(time)")
++                self.heartbeatLock.withLock { $0.tapCallCount += 1 }
+ 
+-                // Converted buffer capacity: same as input buffer size is sufficient
+                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameCapacity) else {
+-                    print("[AudioRecorder] Tap #\(callIndex): failed to create convertedBuffer")
+                     return
+                 }
+                 var error: NSError?
+@@ -150,47 +200,18 @@ final class AudioRecorder: @unchecked Sendable {
+                     return nil
+                 }
+ 
+-                if let err = error {
+-                    print("[AudioRecorder] Tap #\(callIndex): converter error: \(err)")
+-                }
+-                let outputFrames = Int(convertedBuffer.frameLength)
+-                print("[AudioRecorder] Tap #\(callIndex): converted outputFrames=\(outputFrames)")
+-
+-                // Forward to streaming recognizer (e.g., AppleSpeech) for real-time preview
++                // Forward to streaming recognizer (AppleSpeech preview)
+                 self.onAudioBuffer?(convertedBuffer)
+ 
+-                // Append to accumulated full buffer
+-                if let mainBuffer = self.audioBuffer,
+-                   let mainData = mainBuffer.floatChannelData?[0],
+-                   let convertedData = convertedBuffer.floatChannelData?[0] {
+-                    let currentLength = Int(mainBuffer.frameLength)
+-                    let newLength = Int(convertedBuffer.frameLength)
+-                    if currentLength + newLength <= Int(mainBuffer.frameCapacity) {
+-                        for i in 0..<newLength {
+-                            mainData[currentLength + i] = convertedData[i]
+-                        }
+-                        mainBuffer.frameLength = AVAudioFrameCount(currentLength + newLength)
+-                        print("[AudioRecorder] Tap #\(callIndex): appended to audioBuffer, totalFrames=\(currentLength + newLength)")
+-                    } else {
+-                        // Buffer full: flush as a completed segment, reset, then append
+-                        print("[AudioRecorder] Tap #\(callIndex): audioBuffer full (60s), flushing segment")
+-                        if let wavData = AudioFormatConverter.normalizeAndConvertToWAV(mainBuffer) {
+-                            self.segmentContinuation?.yield(wavData)
+-                        }
+-                        mainBuffer.frameLength = 0
+-                        for i in 0..<newLength {
+-                            mainData[i] = convertedData[i]
+-                        }
+-                        mainBuffer.frameLength = AVAudioFrameCount(newLength)
+-                        print("[AudioRecorder] Tap #\(callIndex): reset buffer, new totalFrames=\(newLength)")
+-                    }
+-                } else {
+-                    print("[AudioRecorder] Tap #\(callIndex): audioBuffer is nil or channel data missing")
+-                }
+-
+-                // Yield average amplitude for VU meter
++                // Accumulate raw samples for batch ASR
+                 if let data = convertedBuffer.floatChannelData?[0] {
+                     let frames = Int(convertedBuffer.frameLength)
++                    let samplesArray = Array(UnsafeBufferPointer(start: data, count: frames))
++                    self.sampleLock.withLock {
++                        self.rawSamples.append(contentsOf: samplesArray)
++                    }
++
++                    // Yield average amplitude for VU meter
+                     var sum: Float = 0
+                     for i in 0..<frames {
+                         sum += abs(data[i])
+@@ -206,100 +227,87 @@ final class AudioRecorder: @unchecked Sendable {
+                 print("[AudioRecorder] Engine prepared and started successfully")
+             } catch {
+                 print("[AudioRecorder] Engine start FAILED: \(error)")
+-                continuation.finish()
+-            }
+-
+-            continuation.onTermination = { [weak self] _ in
+-                Task { @MainActor [weak self] in
+-                    guard let self = self, !self.isRecording && !self.isStopping else { return }
+-                    _ = self.stopRecording()
++                let nsError = error as NSError
++                if nsError.domain == "com.apple.coreaudio.avfaudio" {
++                    AppLogger.log("[AudioRecorder] CoreAudio error detected, device may have been disconnected")
++                    onRecordingFrozen?()
+                 }
++                continuation.finish()
+             }
+         }
+ 
+-        return RecordingOutput(amplitude: amplitudeStream, segments: segmentStream)
++        return RecordingOutput(amplitude: amplitudeStream)
+     }
+ 
+-    /// Stops recording and returns all audio data.
+-    /// - `segments`: completed 60s WAV segments that were emitted during recording
+-    /// - `finalData`: the last (partial) segment as WAV, trimmed and normalized
+-    nonisolated func stopRecording() -> (segments: [Data], finalData: Data?) {
+-        print("[AudioRecorder] stopRecording called, tapCallCount=\(tapCallCount)")
+-
+-        if tapCallCount == 0 {
+-            print("[AudioRecorder] CRITICAL: No tap callbacks received. Possible causes:")
+-            print("  - Microphone permission denied (check System Settings > Privacy > Microphone)")
+-            print("  - No input device available")
+-            print("  - AVAudioEngine failed to start")
+-        }
++    nonisolated func stopRecording() {
++        let tapCount = heartbeatLock.withLock { $0.tapCallCount }
++        print("[AudioRecorder] stopRecording called, tapCallCount=\(tapCount)")
+ 
+-        // Graceful stop: tell tap callbacks to finish their current frame
+-        stateLock.withLock {
++        let wasRecording = stateLock.withLock {
++            let was = _isRecording || _isStopping
+             _isStopping = true
+             _isRecording = false
++            return was
++        }
++        if !wasRecording {
++            print("[AudioRecorder] stopRecording: already stopped")
++            return
+         }
++
++        if heartbeatLock.withLock({ $0.tapCallCount }) == 0 {
++            print("[AudioRecorder] CRITICAL: No tap callbacks received.")
++        }
++
++        heartbeatTimer.cancel()
++        heartbeatLock.withLock { $0.lastTapTimestamp = nil }
+         amplitudeContinuation?.finish()
+         amplitudeContinuation = nil
+-        segmentContinuation?.finish()
+-        segmentContinuation = nil
+ 
+-        // Stop engine and remove tap
++        // Stop engine
+         engine?.stop()
+         engine?.inputNode.removeTap(onBus: 0)
+         engine = nil
+-        stateLock.withLock {
+-            _isStopping = false
+-        }
+-
+-        // Note: segmentContinuation yielded segments as they completed.
+-        // We don't have a local buffer here; segments were consumed by the caller.
+-        // The "finalData" is the last partial buffer.
+ 
+-        guard let buffer = audioBuffer else {
+-            print("[AudioRecorder] stopRecording: audioBuffer is nil")
+-            return ([], nil)
++        // Restore original default input device if we changed it
++        if originalDeviceID != kAudioObjectUnknown {
++            var propertyAddress = AudioObjectPropertyAddress(
++                mSelector: kAudioHardwarePropertyDefaultInputDevice,
++                mScope: kAudioObjectPropertyScopeGlobal,
++                mElement: kAudioObjectPropertyElementMain
++            )
++            var deviceIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
++            var mutableOriginalID = originalDeviceID
++            let restoreResult = AudioObjectSetPropertyData(
++                AudioObjectID(kAudioObjectSystemObject),
++                &propertyAddress,
++                0,
++                nil,
++                deviceIDSize,
++                &mutableOriginalID
++            )
++            if restoreResult != noErr {
++                AppLogger.log("[AudioRecorder] Failed to restore original input device: \(restoreResult)")
++            } else {
++                AppLogger.log("[AudioRecorder] Restored original input device")
++            }
++            originalDeviceID = kAudioObjectUnknown
+         }
+ 
+-        let rawFrames = Int(buffer.frameLength)
+-        print("[AudioRecorder] stopRecording: raw audioBuffer has \(rawFrames) frames")
+-
+-        // Trim silence, normalize, convert to WAV
+-        let trimmedBuffer = AudioFormatConverter.trimSilence(buffer)
+-        let trimmedFrames = Int(trimmedBuffer.frameLength)
+-        print("[AudioRecorder] stopRecording: after trimSilence has \(trimmedFrames) frames")
+-
+-        let finalData = AudioFormatConverter.normalizeAndConvertToWAV(trimmedBuffer)
+-
+-        if let data = finalData {
+-            let payload = data.count - 44
+-            let duration = Double(payload) / 32000.0
+-            print("[AudioRecorder] stopRecording: final WAV \(data.count) bytes, ~\(String(format: "%.2f", duration))s")
+-        } else {
+-            print("[AudioRecorder] stopRecording: normalizeAndConvertToWAV returned nil")
++        stateLock.withLock {
++            _isStopping = false
+         }
++    }
+ 
+-        // Debug dump if enabled
+-        if let data = finalData, Configuration.shared.dumpAudio {
+-            dumpWAVData(data)
++    /// Take accumulated raw Float32 samples and clear the buffer.
++    nonisolated func takeAccumulatedSamples() -> [Float] {
++        sampleLock.withLock {
++            let samples = rawSamples
++            rawSamples.removeAll(keepingCapacity: false)
++            return samples
+         }
+-
+-        return ([], finalData)
+     }
+ 
+-    private func dumpWAVData(_ data: Data) {
+-        let formatter = DateFormatter()
+-        formatter.dateFormat = "yyyyMMdd_HHmmss"
+-        let filename = "dump_\(formatter.string(from: Date())).wav"
+-        guard let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+-            .appendingPathComponent("Logs/flowtype", isDirectory: true) else { return }
+-
+-        do {
+-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+-            let url = dir.appendingPathComponent(filename)
+-            try data.write(to: url)
+-            print("[AudioRecorder] Dumped audio to \(url.path)")
+-        } catch {
+-            print("[AudioRecorder] Failed to dump audio: \(error)")
+-        }
++    static func availableInputDevices() -> [AudioDevice] {
++        AudioDeviceEnumerator.availableInputDevices()
+     }
+ }
+diff --git a/Sources/flowtype/Services/KeyboardInjector.swift b/Sources/flowtype/Services/KeyboardInjector.swift
+index 196f0f9..21b7a81 100644
+--- a/Sources/flowtype/Services/KeyboardInjector.swift
++++ b/Sources/flowtype/Services/KeyboardInjector.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import CoreGraphics
+ import AppKit
++import os
+ 
+ enum InjectionError: Error {
+     case eventSourceCreationFailed
+@@ -8,14 +9,39 @@ enum InjectionError: Error {
+ 
+ struct KeyboardInjector {
+ 
++    private static let injectionLock = OSAllocatedUnfairLock<Bool>(uncheckedState: false)
++    static let isInjecting = OSAllocatedUnfairLock<Bool>(uncheckedState: false)
++
+     // MARK: - Entry point: chooses paste for multi-line, keystroke for single-line
+ 
+     static func insertText(_ text: String) async throws {
+-        // If text contains newlines, paste via clipboard to preserve formatting
+-        // without triggering "send" on Return key in chat apps.
+-        if text.contains("\n") || text.contains("\r") {
++        let canProceed = injectionLock.withLock { state in
++            if state { return false }
++            state = true
++            return true
++        }
++        guard canProceed else {
++            AppLogger.log("[KeyboardInjector] Injection already in progress, ignoring duplicate")
++            return
++        }
++
++        defer {
++            injectionLock.withLock { state in
++                state = false
++            }
++        }
++        let startTime = Date()
++        defer {
++            AppLogger.log("[KeyboardInjector] Total injection time: \(String(format: "%.2f", Date().timeIntervalSince(startTime)))s")
++        }
++        // If text contains newlines or is long, paste via clipboard to preserve formatting
++        // and avoid slow keystroke simulation. Short single-line text uses keystrokes for
++        // better compatibility with apps that don't handle paste well.
++        if text.contains("\n") || text.contains("\r") || text.count > 50 {
++            AppLogger.log("[KeyboardInjector] Using pasteText (chars=\(text.count), hasNewline=\(text.contains("\n")))")
+             try await pasteText(text)
+         } else {
++            AppLogger.log("[KeyboardInjector] Using typeText (chars=\(text.count))")
+             try await typeText(text)
+         }
+     }
+@@ -23,6 +49,10 @@ struct KeyboardInjector {
+     // MARK: - Paste via clipboard (preserves formatting, no Return-key side effects)
+ 
+     private static func pasteText(_ text: String) async throws {
++        let pasteStart = Date()
++        defer {
++            AppLogger.log("[KeyboardInjector] pasteText completed in \(String(format: "%.2f", Date().timeIntervalSince(pasteStart)))s")
++        }
+         let pasteboard = NSPasteboard.general
+ 
+         // 1. Save current clipboard contents (all types for each item)
+@@ -55,6 +85,9 @@ struct KeyboardInjector {
+         vDown?.flags = .maskCommand
+         vUp?.flags   = .maskCommand
+ 
++        isInjecting.withLock { $0 = true }
++        defer { isInjecting.withLock { $0 = false } }
++
+         cmdDown?.post(tap: .cghidEventTap)
+         try await Task.sleep(nanoseconds: 5_000_000)
+         vDown?.post(tap: .cghidEventTap)
+@@ -64,21 +97,29 @@ struct KeyboardInjector {
+         cmdUp?.post(tap: .cghidEventTap)
+ 
+         // 4. Wait for paste to complete, then restore clipboard
+-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
++        try await Task.sleep(nanoseconds: 500_000_000) // 500ms — give target app time to read clipboard
+ 
+         pasteboard.clearContents()
+         if let savedItems = savedItems, !savedItems.isEmpty {
++            var newItems: [NSPasteboardItem] = []
+             for (_, dataMap) in savedItems {
++                let item = NSPasteboardItem()
+                 for (type, data) in dataMap {
+-                    pasteboard.setData(data, forType: type)
++                    item.setData(data, forType: type)
+                 }
++                newItems.append(item)
+             }
++            pasteboard.writeObjects(newItems)
+         }
+     }
+ 
+     // MARK: - Keystroke injection (single-line text only)
+ 
+     private static func typeText(_ text: String) async throws {
++        let typeStart = Date()
++        defer {
++            AppLogger.log("[KeyboardInjector] typeText completed in \(String(format: "%.2f", Date().timeIntervalSince(typeStart)))s")
++        }
+         guard let source = CGEventSource(stateID: .hidSystemState) else {
+             throw InjectionError.eventSourceCreationFailed
+         }
+@@ -99,6 +140,45 @@ struct KeyboardInjector {
+         }
+     }
+ 
++    // MARK: - Streaming injection
++
++    /// Inject a small text chunk during streaming LLM output.
++    /// Caller manages sequencing (one chunk at a time via async for-await loop).
++    static func typeChunk(_ chunk: String) async throws {
++        let canProceed = injectionLock.withLock { state in
++            if state { return false }
++            state = true
++            return true
++        }
++        guard canProceed else {
++            AppLogger.log("[KeyboardInjector] typeChunk rejected: injection already in progress")
++            return
++        }
++        defer {
++            injectionLock.withLock { state in
++                state = false
++            }
++        }
++        guard let source = CGEventSource(stateID: .hidSystemState) else {
++            throw InjectionError.eventSourceCreationFailed
++        }
++        isInjecting.withLock { $0 = true }
++        defer { isInjecting.withLock { $0 = false } }
++        for character in chunk {
++            try Task.checkCancellation()
++            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
++            let keyUp   = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
++            let charString = String(character)
++            let utf16Chars = Array(charString.utf16)
++            keyDown?.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: utf16Chars)
++            keyUp?.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: utf16Chars)
++            keyDown?.post(tap: .cghidEventTap)
++            try await Task.sleep(nanoseconds: 5_000_000)
++            keyUp?.post(tap: .cghidEventTap)
++            try await Task.sleep(nanoseconds: 5_000_000)
++        }
++    }
++
+     // MARK: - Public helpers
+ 
+     /// Append only the delta text (difference between already-injected and new text)
+diff --git a/Sources/flowtype/Services/LLMService.swift b/Sources/flowtype/Services/LLMService.swift
+index e09618e..8ec660b 100644
+--- a/Sources/flowtype/Services/LLMService.swift
++++ b/Sources/flowtype/Services/LLMService.swift
+@@ -6,33 +6,53 @@ enum LLMError: Error {
+     case streamDecodingError
+     case networkError(Error)
+     case timeout
++
++    var userFriendlyMessage: String {
++        switch self {
++        case .invalidResponse:
++            return "无效响应格式"
++        case .apiError(let msg):
++            if msg.contains("401") || msg.contains("403") {
++                return "API Key 无效或已过期"
++            } else if msg.contains("404") {
++                return "模型 ID 不存在"
++            } else if msg.contains("500") || msg.contains("502") || msg.contains("503") {
++                return "服务商接口异常"
++            } else if msg.contains("超时") || msg.contains("timeout") {
++                return "连接超时"
++            }
++            return msg
++        case .streamDecodingError:
++            return "流数据解码失败"
++        case .networkError(let error):
++            let nsError = error as NSError
++            if nsError.domain == NSURLErrorDomain {
++                switch nsError.code {
++                case NSURLErrorTimedOut, NSURLErrorDNSLookupFailed:
++                    return "连接超时，请检查网络或 Base URL"
++                case NSURLErrorCannotFindHost:
++                    return "无法解析 Base URL"
++                case NSURLErrorNotConnectedToInternet:
++                    return "网络未连接"
++                default:
++                    break
++                }
++            }
++            return "网络错误: \(error.localizedDescription)"
++        case .timeout:
++            return "请求超时"
++        }
++    }
+ }
+ 
+ actor LLMService {
+-    private let apiKey: String
+-    private let baseURL: String
+-    private let model: String
+-    private let temperature: Double
+-    private let maxTokens: Int
+-    private let systemPrompt: String
+-
+-    init(configuration: Configuration) {
+-        self.apiKey = configuration.apiKey
+-        self.baseURL = configuration.baseURL
+-        self.model = configuration.llmModel
+-        self.temperature = configuration.temperature
+-        self.maxTokens = configuration.maxTokens
+-        self.systemPrompt = configuration.systemPrompt
+-    }
+ 
+-    /// Check if text is worth polishing. Returns nil if should skip.
++    init() {}
++
+     static func shouldPolish(_ text: String) -> String? {
+         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+-
+-        // Skip empty or very short text
+         guard trimmed.count >= 4 else { return nil }
+ 
+-        // Skip pure filler text
+         let fillerPattern = "^[嗯啊哦呃哼哈呀哪那个这个那么就是对吧然后然后]+$"
+         if let regex = try? NSRegularExpression(pattern: fillerPattern),
+            regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: trimmed.utf16.count)) != nil {
+@@ -42,25 +62,188 @@ actor LLMService {
+         return trimmed
+     }
+ 
+-    func polishText(_ text: String) -> AsyncThrowingStream<String, Error> {
+-        AsyncThrowingStream { continuation in
++    // MARK: - Public API
++
++    func polishText(_ text: String, systemPrompt: String? = nil) -> AsyncThrowingStream<String, Error> {
++        let config = ConfigurationStore.shared.current
++        let prompt = systemPrompt ?? config.systemPrompt
++        let maxTokens = config.maxTokens
++        return makeStream(text: text, systemPrompt: prompt, maxTokens: maxTokens, timeoutSeconds: 30, config: config)
++    }
++
++    @MainActor
++    static func composeSystemPrompt(fallback: String) -> String {
++        let activePack = StylePackStore.shared.activePack
++        var prompt = activePack?.prompt ?? fallback
++
++        let phrases = DictionaryStore.shared.enabledPhrases
++        if !phrases.isEmpty {
++            let hotwordBlock = "\n\n以下是用户的专有名词词典，请在输出中优先使用这些正确写法：\n" + phrases.joined(separator: "、")
++            if prompt.contains("{{HOTWORDS}}") {
++                prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: hotwordBlock)
++            } else {
++                prompt += hotwordBlock
++            }
++        } else {
++            prompt = prompt.replacingOccurrences(of: "{{HOTWORDS}}", with: "")
++        }
++
++        return prompt
++    }
++
++    // MARK: - Provider Resolution
++
++    private func resolveProviderChain(providers: [LLMProvider]) -> [(provider: LLMProvider, apiKey: String)] {
++        var result: [(provider: LLMProvider, apiKey: String)] = []
++
++        // Active provider first
++        if let active = providers.first(where: \.isActive) {
++            if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(active.id),
++               !apiKey.isEmpty {
++                result.append((active, apiKey))
++            }
++        }
++
++        // Then other providers with valid API keys
++        for provider in providers {
++            if provider.isActive { continue } // Skip active, already added
++            if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(provider.id),
++               !apiKey.isEmpty {
++                result.append((provider, apiKey))
++            }
++        }
++
++        return result
++    }
++
++    // MARK: - Connection Test
++
++    func testConnection(provider: LLMProvider) async -> Result<String, LLMError> {
++        guard let apiKey = ConfigurationStore.shared.loadProviderAPIKey(provider.id),
++              !apiKey.isEmpty else {
++            return .failure(LLMError.apiError("请在设置中配置 LLM API Key"))
++        }
++
++        guard let url = URL(string: "\(provider.baseURL)/chat/completions") else {
++            return .failure(LLMError.invalidResponse)
++        }
++
++        let body: [String: Any] = [
++            "model": provider.model,
++            "messages": [
++                ["role": "user", "content": "hello"]
++            ],
++            "stream": false,
++            "temperature": 0.3,
++            "max_tokens": 5
++        ]
++
++        do {
++            let requestBody = try JSONSerialization.data(withJSONObject: body)
++            var request = URLRequest(url: url)
++            request.httpMethod = "POST"
++            request.timeoutInterval = 10
++            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
++            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
++            request.httpBody = requestBody
++
++            let (data, response) = try await URLSession.shared.data(for: request)
++
++            guard let httpResponse = response as? HTTPURLResponse else {
++                return .failure(LLMError.apiError("Non-HTTP response"))
++            }
++
++            guard (200...299).contains(httpResponse.statusCode) else {
++                let statusCode = httpResponse.statusCode
++                let errorBody = String(data: data, encoding: .utf8) ?? "(unable to decode error body)"
++                AppLogger.log("[LLMService] testConnection HTTP \(statusCode): \(errorBody.prefix(500))")
++                return .failure(LLMError.apiError("HTTP \(statusCode): \(errorBody.prefix(200))"))
++            }
++
++            return .success("连接成功")
++        } catch {
++            AppLogger.log("[LLMService] testConnection error: \(error)")
++            return .failure(LLMError.networkError(error))
++        }
++    }
++
++    // MARK: - Shared streaming infrastructure
++
++    private func makeStream(
++        text: String,
++        systemPrompt: String,
++        maxTokens: Int,
++        timeoutSeconds: UInt64,
++        config: Configuration
++    ) -> AsyncThrowingStream<String, Error> {
++        let temperature = config.temperature
++
++        return AsyncThrowingStream { continuation in
+             Task {
+-                // Skip if text is not worth polishing
+                 guard let validatedText = Self.shouldPolish(text) else {
+                     continuation.finish()
+                     return
+                 }
++                if systemPrompt.isEmpty {
++                    AppLogger.log("[LLMService] WARNING: systemPrompt is empty, skipping")
++                    continuation.finish()
++                    return
++                }
+ 
+-                do {
+-                    try await self.streamPolish(text: validatedText, continuation: continuation)
+-                } catch {
+-                    continuation.finish(throwing: error)
++                let chain = self.resolveProviderChain(providers: config.llmProviders)
++                guard !chain.isEmpty else {
++                    continuation.finish(throwing: LLMError.apiError("请在设置中配置 LLM API Key"))
++                    return
++                }
++
++                var lastError: Error?
++                let maxAttempts = min(chain.count, 2)
++                for i in 0..<maxAttempts {
++                    let resolved = chain[i]
++                    do {
++                        AppLogger.log("[LLMService] Trying provider \(resolved.provider.name) (attempt \(i+1)/\(maxAttempts))")
++                        try await Self.streamRequest(
++                            apiKey: resolved.apiKey,
++                            baseURL: resolved.provider.baseURL,
++                            model: resolved.provider.model,
++                            temperature: temperature,
++                            systemPrompt: systemPrompt,
++                            userMessage: validatedText,
++                            maxTokens: maxTokens,
++                            timeoutSeconds: timeoutSeconds,
++                            continuation: continuation
++                        )
++                        return // Success — streamRequest finished normally
++                    } catch {
++                        lastError = error
++                        AppLogger.log("[LLMService] Provider \(resolved.provider.name) failed: \(error)")
++                        if i < maxAttempts - 1 {
++                            AppLogger.log("[LLMService] Falling back to next provider...")
++                        }
++                    }
++                }
++
++                // All attempts exhausted
++                if let lastError = lastError {
++                    continuation.finish(throwing: lastError)
++                } else {
++                    continuation.finish(throwing: LLMError.apiError("所有 Provider 均不可用"))
+                 }
+             }
+         }
+     }
+ 
+-    private func streamPolish(text: String, continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
++    private static func streamRequest(
++        apiKey: String,
++        baseURL: String,
++        model: String,
++        temperature: Double,
++        systemPrompt: String,
++        userMessage: String,
++        maxTokens: Int,
++        timeoutSeconds: UInt64,
++        continuation: AsyncThrowingStream<String, Error>.Continuation
++    ) async throws {
+         guard let url = URL(string: "\(baseURL)/chat/completions") else {
+             throw LLMError.invalidResponse
+         }
+@@ -69,7 +252,7 @@ actor LLMService {
+             "model": model,
+             "messages": [
+                 ["role": "system", "content": systemPrompt],
+-                ["role": "user", "content": text]
++                ["role": "user", "content": userMessage]
+             ],
+             "stream": true,
+             "temperature": temperature,
+@@ -78,22 +261,33 @@ actor LLMService {
+ 
+         let requestBody = try JSONSerialization.data(withJSONObject: body)
+ 
+-        // Use withThrowingTaskGroup for timeout control
+         try await withThrowingTaskGroup(of: Void.self) { group in
+-            // Main SSE reading task
+             group.addTask {
+                 var request = URLRequest(url: url)
+                 request.httpMethod = "POST"
+-                request.timeoutInterval = 10  // 10s total timeout
+-                request.setValue("Bearer \(self.apiKey)", forHTTPHeaderField: "Authorization")
++                request.timeoutInterval = TimeInterval(timeoutSeconds)
++                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                 request.httpBody = requestBody
+ 
+                 let (bytes, response) = try await URLSession.shared.bytes(for: request)
+ 
+-                guard let httpResponse = response as? HTTPURLResponse,
+-                      (200...299).contains(httpResponse.statusCode) else {
+-                    throw LLMError.apiError("Invalid response")
++                guard let httpResponse = response as? HTTPURLResponse else {
++                    throw LLMError.apiError("Non-HTTP response")
++                }
++
++                guard (200...299).contains(httpResponse.statusCode) else {
++                    let statusCode = httpResponse.statusCode
++                    var errorBody = ""
++                    do {
++                        for try await line in bytes.lines.prefix(20) {
++                            errorBody += line + "\n"
++                        }
++                    } catch {
++                        errorBody = "(unable to read error body)"
++                    }
++                    AppLogger.log("[LLMService] HTTP \(statusCode): \(errorBody.prefix(500))")
++                    throw LLMError.apiError("HTTP \(statusCode): \(errorBody.prefix(200))")
+                 }
+ 
+                 for try await line in bytes.lines {
+@@ -108,9 +302,6 @@ actor LLMService {
+                             if let chunk = try? JSONDecoder().decode(StreamChunk.self, from: chunkData),
+                                let content = chunk.choices.first?.delta.content {
+                                 continuation.yield(content)
+-                            } else if let raw = String(data: chunkData, encoding: .utf8) {
+-                                // Log unparseable chunks so we can diagnose API changes
+-                                print("[LLMService] Unparseable SSE chunk: \(raw)")
+                             }
+                         }
+                     }
+@@ -119,13 +310,11 @@ actor LLMService {
+                 continuation.finish()
+             }
+ 
+-            // Timeout task
+             group.addTask {
+-                try await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
++                try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                 throw LLMError.timeout
+             }
+ 
+-            // Wait for first to complete
+             try await group.next()!
+             group.cancelAll()
+         }
+diff --git a/Sources/flowtype/Settings/HistoryPage.swift b/Sources/flowtype/Settings/HistoryPage.swift
+new file mode 100644
+index 0000000..ac2bfb7
+--- /dev/null
++++ b/Sources/flowtype/Settings/HistoryPage.swift
+@@ -0,0 +1,294 @@
++import SwiftUI
++
++struct HistoryPage: View {
++    @ObservedObject private var historyStore = HistoryStore.shared
++    @State private var selectedID: String?
++    @State private var searchText: String = ""
++    @State private var filterMode: PolishMode?
++    @State private var showClearConfirm = false
++
++    var body: some View {
++        VStack(spacing: 0) {
++            headerBar
++            Divider()
++            HSplitView {
++                sessionList
++                    .frame(minWidth: 240, idealWidth: 280)
++                detailPanel
++                    .frame(minWidth: 300)
++            }
++        }
++        .background(Color(nsColor: .windowBackgroundColor))
++        .alert("确认清空", isPresented: $showClearConfirm) {
++            Button("清空全部", role: .destructive) { historyStore.clear() }
++            Button("取消", role: .cancel) {}
++        } message: {
++            Text("将删除所有历史记录，此操作不可撤销。")
++        }
++    }
++
++    // MARK: - Header
++
++    private var headerBar: some View {
++        HStack(spacing: 12) {
++            PageHeader(title: "历史记录", subtitle: "共 \(filteredSessions.count) 条")
++
++            Spacer()
++
++            Picker("", selection: $filterMode) {
++                Text("全部").tag(Optional<PolishMode>.none)
++                ForEach(PolishMode.allCases) { mode in
++                    Text(mode.displayName).tag(Optional(mode))
++                }
++            }
++            .pickerStyle(.segmented)
++            .frame(width: 280)
++
++            TextField("搜索...", text: $searchText)
++                .textFieldStyle(.roundedBorder)
++                .frame(width: 140)
++
++            Button {
++                exportSessions()
++            } label: {
++                Image(systemName: "square.and.arrow.up")
++            }
++            .buttonStyle(.borderless)
++            .disabled(filteredSessions.isEmpty)
++
++            Button(role: .destructive) {
++                showClearConfirm = true
++            } label: {
++                Image(systemName: "trash")
++            }
++            .buttonStyle(.borderless)
++            .disabled(historyStore.sessions.isEmpty)
++        }
++        .padding(.horizontal, 20)
++        .padding(.vertical, 12)
++    }
++
++    // MARK: - List
++
++    private var filteredSessions: [DictationSession] {
++        historyStore.sessions.filter { session in
++            if let mode = filterMode, session.polishMode != mode { return false }
++            if !searchText.isEmpty {
++                let query = searchText.lowercased()
++                return session.finalText.lowercased().contains(query) ||
++                       session.rawTranscript.lowercased().contains(query)
++            }
++            return true
++        }
++    }
++
++    private var sessionList: some View {
++        List(filteredSessions, selection: $selectedID) { session in
++            VStack(alignment: .leading, spacing: 4) {
++                HStack(spacing: 6) {
++                    Text(session.polishMode.displayName)
++                        .font(.system(size: 10, weight: .medium))
++                        .foregroundColor(.white)
++                        .padding(.horizontal, 6)
++                        .padding(.vertical, 2)
++                        .background(pillColor(session.polishMode))
++                        .clipShape(Capsule())
++
++                    Spacer()
++
++                    Text(formatDate(session.createdAt))
++                        .font(.system(size: 10))
++                        .foregroundColor(.secondary)
++                }
++
++                Text(session.finalText)
++                    .font(.system(size: 12))
++                    .lineLimit(2)
++                    .foregroundColor(.primary)
++
++                if let ms = session.durationMs {
++                    Text("\(String(format: "%.1f", Double(ms) / 1000))s")
++                        .font(.system(size: 10))
++                        .foregroundColor(.secondary)
++                }
++            }
++            .padding(.vertical, 4)
++            .tag(session.id)
++            .contextMenu {
++                Button("复制") {
++                    NSPasteboard.general.clearContents()
++                    NSPasteboard.general.setString(session.finalText, forType: .string)
++                }
++                Divider()
++                Button("删除", role: .destructive) {
++                    if selectedID == session.id { selectedID = nil }
++                    historyStore.delete(id: session.id)
++                }
++            }
++        }
++        .listStyle(.inset)
++    }
++
++    // MARK: - Detail
++
++    private var selectedSession: DictationSession? {
++        guard let id = selectedID else { return nil }
++        return historyStore.sessions.first(where: { $0.id == id })
++    }
++
++    private var detailPanel: some View {
++        Group {
++            if let session = selectedSession {
++                ScrollView {
++                    VStack(alignment: .leading, spacing: 16) {
++                        HStack {
++                            Text(session.polishMode.displayName)
++                                .font(.system(size: 11, weight: .medium))
++                                .foregroundColor(.white)
++                                .padding(.horizontal, 8)
++                                .padding(.vertical, 3)
++                                .background(pillColor(session.polishMode))
++                                .clipShape(Capsule())
++
++                            Spacer()
++
++                            Text(formatDateFull(session.createdAt))
++                                .font(.system(size: 12))
++                                .foregroundColor(.secondary)
++                        }
++
++                        if session.rawTranscript != session.finalText {
++                            DetailSection(title: "原始识别", text: session.rawTranscript)
++                        }
++
++                        DetailSection(title: "最终文本", text: session.finalText)
++
++                        HStack(spacing: 12) {
++                            Button {
++                                NSPasteboard.general.clearContents()
++                                NSPasteboard.general.setString(session.finalText, forType: .string)
++                            } label: {
++                                Label("复制", systemImage: "doc.on.doc")
++                            }
++                            .buttonStyle(.bordered)
++                            .controlSize(.small)
++
++                            Button(role: .destructive) {
++                                selectedID = nil
++                                historyStore.delete(id: session.id)
++                            } label: {
++                                Label("删除", systemImage: "trash")
++                            }
++                            .buttonStyle(.bordered)
++                            .controlSize(.small)
++                        }
++                    }
++                    .padding(20)
++                }
++            } else {
++                VStack {
++                    Spacer()
++                    Image(systemName: "doc.text.magnifyingglass")
++                        .font(.system(size: 32))
++                        .foregroundColor(.secondary.opacity(0.4))
++                    Text("选择一条记录查看详情")
++                        .font(.system(size: 13))
++                        .foregroundColor(.secondary)
++                    Spacer()
++                }
++                .frame(maxWidth: .infinity)
++            }
++        }
++    }
++
++    // MARK: - Helpers
++
++    private func pillColor(_ mode: PolishMode) -> Color {
++        switch mode {
++        case .raw: return .blue
++        case .light: return .teal
++        case .structured: return .purple
++        case .formal: return .orange
++        }
++    }
++
++    private func formatDate(_ date: Date) -> String {
++        let formatter = DateFormatter()
++        formatter.dateFormat = "MM/dd HH:mm"
++        return formatter.string(from: date)
++    }
++
++    private func formatDateFull(_ date: Date) -> String {
++        let formatter = DateFormatter()
++        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
++        return formatter.string(from: date)
++    }
++
++    private func exportSessions() {
++        let sessions = filteredSessions
++        guard !sessions.isEmpty else { return }
++
++        let panel = NSSavePanel()
++        panel.allowedContentTypes = [.json, .plainText]
++        panel.nameFieldStringValue = "flowtype_history_\(formatDateFile(Date()))"
++
++        guard panel.runModal() == .OK, let url = panel.url else { return }
++
++        let ext = url.pathExtension.lowercased()
++        do {
++            if ext == "json" {
++                let data = try JSONEncoder().encode(sessions)
++                try data.write(to: url)
++            } else {
++                // CSV
++                var csv = "Created At,Mode,Duration (s),Final Text\n"
++                for session in sessions {
++                    let date = formatDateFull(session.createdAt)
++                    let mode = session.polishMode.displayName
++                    let duration = session.durationMs.map { String(Double($0) / 1000.0) } ?? ""
++                    let text = session.finalText.replacingOccurrences(of: "\"", with: "\"\"")
++                    csv += "\"\(date)\",\"\(mode)\",\"\(duration)\",\"\(text)\"\n"
++                }
++                try csv.write(to: url, atomically: true, encoding: .utf8)
++            }
++        } catch {
++            AppLogger.log("[HistoryPage] Export failed: \(error)")
++        }
++    }
++
++    private static let fileDateFormatter: DateFormatter = {
++        let formatter = DateFormatter()
++        formatter.dateFormat = "yyyyMMdd_HHmmss"
++        return formatter
++    }()
++
++    private func formatDateFile(_ date: Date) -> String {
++        Self.fileDateFormatter.string(from: date)
++    }
++}
++
++private struct DetailSection: View {
++    let title: String
++    let text: String
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 6) {
++            Text(title)
++                .font(.system(size: 12, weight: .semibold))
++                .foregroundColor(.secondary)
++            Text(text)
++                .font(.system(size: 13))
++                .textSelection(.enabled)
++                .padding(12)
++                .frame(maxWidth: .infinity, alignment: .leading)
++                .background(
++                    RoundedRectangle(cornerRadius: 8)
++                        .fill(Color(nsColor: .textBackgroundColor))
++                )
++                .overlay(
++                    RoundedRectangle(cornerRadius: 8)
++                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
++                )
++        }
++    }
++}
+diff --git a/Sources/flowtype/Settings/SettingsView.swift b/Sources/flowtype/Settings/SettingsView.swift
+index 75419ac..c1ec530 100644
+--- a/Sources/flowtype/Settings/SettingsView.swift
++++ b/Sources/flowtype/Settings/SettingsView.swift
+@@ -16,7 +16,6 @@ struct ProviderPicker: View {
+         .onChange(of: provider) { _, newValue in
+             if let preset = ProviderPreset.all.first(where: { $0.name == newValue }),
+                !preset.isCustom {
+-                // Auto-fill base URL if current one is empty or matches another preset
+                 if baseURL.isEmpty || ProviderPreset.all.contains(where: { $0.baseURL == baseURL && !$0.isCustom }) {
+                     baseURL = preset.baseURL
+                 }
+@@ -96,6 +95,97 @@ struct ModelIDField: View {
+     }
+ }
+ 
++// MARK: - Qwen3-ASR Status Card
++
++struct QwenModelStatusCard: View {
++    @ObservedObject private var modelState = QwenModelState.shared
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 10) {
++            HStack(spacing: 8) {
++                Image(systemName: statusIcon)
++                    .font(.system(size: 16))
++                    .foregroundColor(statusColor)
++
++                VStack(alignment: .leading, spacing: 2) {
++                    Text(statusTitle)
++                        .font(.system(size: 13, weight: .medium))
++                        .foregroundColor(statusColor)
++                    Text("aufklarer/Qwen3-ASR-0.6B-MLX-4bit")
++                        .font(.system(size: 11))
++                        .foregroundColor(.secondary)
++                }
++
++                Spacer()
++
++                if case .error = modelState.status {
++                    Button("重试") {
++                        Task {
++                            let provider = SessionController.shared.qwenProvider
++                            await modelState.loadModel(provider: provider)
++                        }
++                    }
++                    .buttonStyle(.borderedProminent)
++                    .controlSize(.small)
++                }
++            }
++
++            if case .downloading(let progress, let detail) = modelState.status {
++                ProgressView(value: progress)
++                    .progressViewStyle(.linear)
++                    .frame(height: 4)
++                Text(detail)
++                    .font(.system(size: 10))
++                    .foregroundColor(.secondary)
++                    .lineLimit(1)
++            }
++
++            if case .loading = modelState.status {
++                ProgressView()
++                    .progressViewStyle(.linear)
++                    .frame(height: 4)
++            }
++        }
++        .padding(14)
++        .background(
++            RoundedRectangle(cornerRadius: 10)
++                .fill(Color(nsColor: .controlBackgroundColor))
++                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
++        )
++        .overlay(
++            RoundedRectangle(cornerRadius: 10)
++                .stroke(statusColor.opacity(0.3), lineWidth: 1)
++        )
++    }
++
++    private var statusIcon: String {
++        switch modelState.status {
++        case .ready: return "checkmark.circle.fill"
++        case .downloading, .loading: return "arrow.triangle.2.circlepath"
++        case .error: return "xmark.circle.fill"
++        case .notLoaded: return "circle.dashed"
++        }
++    }
++
++    private var statusColor: Color {
++        switch modelState.status {
++        case .ready: return .green
++        case .downloading, .loading, .notLoaded: return .orange
++        case .error: return .red
++        }
++    }
++
++    private var statusTitle: String {
++        switch modelState.status {
++        case .ready: return "Qwen3-ASR 就绪"
++        case .downloading(let progress, _): return "下载中 \(Int(progress * 100))%"
++        case .loading: return "加载模型中..."
++        case .error: return "加载失败"
++        case .notLoaded: return "等待加载"
++        }
++    }
++}
++
+ // MARK: - Service Config Card
+ 
+ struct ServiceConfigCard: View {
+@@ -109,7 +199,6 @@ struct ServiceConfigCard: View {
+ 
+     var body: some View {
+         VStack(alignment: .leading, spacing: 16) {
+-            // Header
+             VStack(alignment: .leading, spacing: 2) {
+                 Text(title)
+                     .font(.system(size: 13, weight: .semibold))
+@@ -120,7 +209,6 @@ struct ServiceConfigCard: View {
+ 
+             Divider()
+ 
+-            // Provider
+             VStack(alignment: .leading, spacing: 6) {
+                 Text("服务商")
+                     .font(.system(size: 12, weight: .medium))
+@@ -128,7 +216,6 @@ struct ServiceConfigCard: View {
+                 ProviderPicker(provider: $provider, baseURL: $baseURL)
+             }
+ 
+-            // Base URL
+             VStack(alignment: .leading, spacing: 6) {
+                 Text("Base URL")
+                     .font(.system(size: 12, weight: .medium))
+@@ -146,10 +233,8 @@ struct ServiceConfigCard: View {
+                     )
+             }
+ 
+-            // API Key
+             SecureKeyField(title: "API Key", key: $apiKey)
+ 
+-            // Model
+             ModelIDField(title: "模型 ID", model: $model, placeholder: modelPlaceholder)
+         }
+         .padding(16)
+@@ -165,12 +250,340 @@ struct ServiceConfigCard: View {
+     }
+ }
+ 
++// MARK: - Provider Validation
++
++enum ProviderValidationError: LocalizedError {
++    case emptyName
++    case emptyModel
++    case invalidBaseURL(String)
++    case duplicateName
++
++    var errorDescription: String? {
++        switch self {
++        case .emptyName: return "Provider 名称不能为空"
++        case .emptyModel: return "模型 ID 不能为空"
++        case .invalidBaseURL(let msg): return msg
++        case .duplicateName: return "Provider 名称不能重复"
++        }
++    }
++}
++
++func validateProvider(_ provider: LLMProvider, existingProviders: [LLMProvider], excludingID: UUID? = nil) -> ProviderValidationError? {
++    if provider.name.trimmingCharacters(in: .whitespaces).isEmpty {
++        return .emptyName
++    }
++    if provider.model.trimmingCharacters(in: .whitespaces).isEmpty {
++        return .emptyModel
++    }
++
++    var baseURL = provider.baseURL.trimmingCharacters(in: .whitespaces)
++    if baseURL.isEmpty {
++        return .invalidBaseURL("Base URL 不能为空")
++    }
++    if !baseURL.lowercased().hasPrefix("https://") {
++        return .invalidBaseURL("Base URL 必须以 https:// 开头")
++    }
++
++    let trimmedName = provider.name.trimmingCharacters(in: .whitespaces)
++    let duplicate = existingProviders.first(where: {
++        $0.name.trimmingCharacters(in: .whitespaces) == trimmedName && $0.id != provider.id && $0.id != excludingID
++    })
++    if duplicate != nil {
++        return .duplicateName
++    }
++
++    return nil
++}
++
++func normalizeBaseURL(_ url: String) -> String {
++    var result = url.trimmingCharacters(in: .whitespaces)
++    while result.hasSuffix("/") {
++        result = String(result.dropLast())
++    }
++    return result
++}
++
++// MARK: - Provider Edit Sheet
++
++struct ProviderEditSheet: View {
++    @Binding var provider: LLMProvider
++    @Binding var apiKey: String
++    var existingProviders: [LLMProvider]
++    var onSave: () -> Void
++    var onCancel: () -> Void
++
++    @State private var testStatus: TestStatus = .idle
++    @State private var validationError: String? = nil
++
++    enum TestStatus: Equatable {
++        case idle, testing, success, failure(String)
++    }
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 16) {
++            Text(provider.name.isEmpty ? "添加 Provider" : "编辑 Provider")
++                .font(.system(size: 16, weight: .semibold))
++
++            ServiceConfigCard(
++                title: provider.name.isEmpty ? "新 Provider" : provider.name,
++                subtitle: "配置大语言模型服务商",
++                provider: $provider.provider,
++                baseURL: $provider.baseURL,
++                apiKey: $apiKey,
++                model: $provider.model,
++                modelPlaceholder: "例如：deepseek-ai/DeepSeek-V3"
++            )
++
++            // Validation / test error display
++            if let error = validationError {
++                HStack(spacing: 6) {
++                    Image(systemName: "exclamationmark.triangle.fill")
++                        .font(.system(size: 12))
++                        .foregroundColor(.red)
++                    Text(error)
++                        .font(.system(size: 12))
++                        .foregroundColor(.red)
++                }
++                .padding(10)
++                .background(Color.red.opacity(0.08))
++                .clipShape(RoundedRectangle(cornerRadius: 8))
++            }
++
++            // Test status display
++            switch testStatus {
++            case .idle:
++                EmptyView()
++            case .testing:
++                HStack(spacing: 6) {
++                    ProgressView().controlSize(.small)
++                    Text("正在测试连接...")
++                        .font(.system(size: 12))
++                        .foregroundColor(.secondary)
++                }
++            case .success:
++                HStack(spacing: 6) {
++                    Image(systemName: "checkmark.circle.fill")
++                        .font(.system(size: 12))
++                        .foregroundColor(.green)
++                    Text("连接成功")
++                        .font(.system(size: 12))
++                        .foregroundColor(.green)
++                }
++                .padding(10)
++                .background(Color.green.opacity(0.08))
++                .clipShape(RoundedRectangle(cornerRadius: 8))
++            case .failure(let msg):
++                HStack(spacing: 6) {
++                    Image(systemName: "xmark.circle.fill")
++                        .font(.system(size: 12))
++                        .foregroundColor(.red)
++                    Text(msg)
++                        .font(.system(size: 12))
++                        .foregroundColor(.red)
++                }
++                .padding(10)
++                .background(Color.red.opacity(0.08))
++                .clipShape(RoundedRectangle(cornerRadius: 8))
++            }
++
++            HStack {
++                Spacer()
++                Button("取消", action: onCancel)
++                    .buttonStyle(.plain)
++                Button("保存") {
++                    Task {
++                        await attemptSave()
++                    }
++                }
++                .buttonStyle(.borderedProminent)
++                .disabled(testStatus == .testing)
++            }
++        }
++        .padding(20)
++        .frame(width: 480)
++    }
++
++    private func attemptSave() async {
++        validationError = nil
++
++        // Step 1: Validation
++        if let error = validateProvider(provider, existingProviders: existingProviders) {
++            validationError = error.localizedDescription
++            return
++        }
++
++        // Normalize base URL
++        provider.baseURL = normalizeBaseURL(provider.baseURL)
++
++        // Step 2: Connection test (skip if API key is empty)
++        if !apiKey.isEmpty {
++            testStatus = .testing
++            let service = LLMService()
++            let result = await service.testConnection(provider: provider)
++            switch result {
++            case .success:
++                testStatus = .success
++                // Small delay so user sees success
++                try? await Task.sleep(nanoseconds: 300_000_000)
++            case .failure(let error):
++                let msg = error.userFriendlyMessage
++                testStatus = .failure(msg)
++                validationError = "连接测试失败: \(msg)"
++                return
++            }
++        }
++
++        onSave()
++    }
++}
++
++// MARK: - Provider Row
++
++struct ProviderRow: View {
++    let provider: LLMProvider
++    let isActive: Bool
++    let onSetActive: () -> Void
++    let onEdit: () -> Void
++    let onDelete: () -> Void
++
++    @State private var testStatus: TestStatus = .idle
++
++    enum TestStatus: Equatable {
++        case idle, testing, success, failure(String)
++    }
++
++    var body: some View {
++        HStack(spacing: 12) {
++            // Status dot
++            Circle()
++                .fill(isActive ? Color.green : Color.gray.opacity(0.4))
++                .frame(width: 8, height: 8)
++
++            // Info
++            VStack(alignment: .leading, spacing: 2) {
++                Text(provider.name)
++                    .font(.system(size: 13, weight: .semibold))
++                HStack(spacing: 4) {
++                    Text(provider.provider)
++                        .font(.system(size: 10))
++                        .padding(.horizontal, 6)
++                        .padding(.vertical, 2)
++                        .background(Color.secondary.opacity(0.12))
++                        .clipShape(Capsule())
++                    Text(provider.model)
++                        .font(.system(size: 10))
++                        .foregroundColor(.secondary)
++                        .lineLimit(1)
++                }
++            }
++
++            Spacer()
++
++            // Connection test indicator
++            HStack(spacing: 4) {
++                switch testStatus {
++                case .idle:
++                    EmptyView()
++                case .testing:
++                    ProgressView()
++                        .controlSize(.small)
++                        .frame(width: 14, height: 14)
++                case .success:
++                    Image(systemName: "checkmark.circle.fill")
++                        .font(.system(size: 12))
++                        .foregroundColor(.green)
++                case .failure:
++                    Image(systemName: "xmark.circle.fill")
++                        .font(.system(size: 12))
++                        .foregroundColor(.red)
++                }
++
++                Button(action: {
++                    Task {
++                        await runTest()
++                    }
++                }) {
++                    Image(systemName: "bolt.horizontal.circle")
++                        .font(.system(size: 12))
++                        .foregroundColor(.secondary)
++                }
++                .buttonStyle(.plain)
++                .disabled(testStatus == .testing)
++            }
++
++            // Actions
++            HStack(spacing: 6) {
++                if !isActive {
++                    Button("设为默认") {
++                        onSetActive()
++                    }
++                    .font(.system(size: 11))
++                    .buttonStyle(.plain)
++                    .foregroundColor(.blue)
++                }
++
++                Button("编辑") {
++                    onEdit()
++                }
++                .font(.system(size: 11))
++                .buttonStyle(.plain)
++                .foregroundColor(.secondary)
++
++                Button("删除") {
++                    onDelete()
++                }
++                .font(.system(size: 11))
++                .buttonStyle(.plain)
++                .foregroundColor(.red.opacity(0.8))
++            }
++        }
++        .padding(12)
++        .background(
++            RoundedRectangle(cornerRadius: 10)
++                .fill(Color(nsColor: .controlBackgroundColor))
++                .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
++        )
++        .overlay(
++            RoundedRectangle(cornerRadius: 10)
++                .stroke(isActive ? Color.green.opacity(0.4) : Color.secondary.opacity(0.08), lineWidth: isActive ? 2 : 1)
++        )
++    }
++
++    private func runTest() async {
++        testStatus = .testing
++        let service = LLMService()
++        let result = await service.testConnection(provider: provider)
++        await MainActor.run {
++            switch result {
++            case .success:
++                testStatus = .success
++            case .failure(let error):
++                let msg: String
++                switch error {
++                case .apiError(let s): msg = s
++                case .networkError(let e): msg = e.localizedDescription
++                default: msg = "连接失败"
++                }
++                testStatus = .failure(msg)
++            }
++        }
++    }
++}
++
+ // MARK: - Settings View
+ 
+-struct SettingsView: View {
+-    @StateObject private var store = ConfigurationStore.shared
++struct SettingsPage: View {
++    @ObservedObject private var store = ConfigurationStore.shared
+     @State private var showSaved = false
+     @State private var hasAccessibility = false
++    @State private var availableDevices: [AudioDevice] = []
++    @State private var selectedDeviceUnavailable: Bool = false
++
++    // Provider sheet states
++    @State private var showAddProvider = false
++    @State private var editingProvider: LLMProvider? = nil
++    @State private var draftProvider = LLMProvider(name: "", provider: "SiliconFlow", baseURL: "https://api.siliconflow.cn/v1", model: "", isActive: false)
++    @State private var draftApiKey = ""
+ 
+     var body: some View {
+         ScrollView {
+@@ -199,48 +612,54 @@ struct SettingsView: View {
+                         Spacer()
+                     }
+ 
+-                    Text("配置语音识别服务商。Flowtype 采用双模型兜底架构：主模型优先识别，当主模型失败或质量不佳时自动切换到兜底模型。")
++                    Text("Flowtype 使用本地 Qwen3-ASR 模型进行语音识别，AppleSpeech 作为兜底方案。所有识别均在本地完成，无需联网。")
+                         .font(.system(size: 11))
+                         .foregroundColor(.secondary)
+                         .lineLimit(nil)
+                         .fixedSize(horizontal: false, vertical: true)
+ 
+-                    // Primary ASR
+-                    ServiceConfigCard(
+-                        title: "主识别模型",
+-                        subtitle: "优先使用的语音识别服务",
+-                        provider: $store.current.asrPrimaryProvider,
+-                        baseURL: $store.current.asrPrimaryBaseURL,
+-                        apiKey: $store.current.asrPrimaryApiKey,
+-                        model: $store.current.asrPrimaryModel,
+-                        modelPlaceholder: "例如：TeleAI/TeleSpeechASR"
+-                    )
++                    QwenModelStatusCard()
+ 
+-                    // Fallback ASR
+-                    ServiceConfigCard(
+-                        title: "兜底识别模型",
+-                        subtitle: "当主模型失败时自动切换",
+-                        provider: $store.current.asrFallbackProvider,
+-                        baseURL: $store.current.asrFallbackBaseURL,
+-                        apiKey: $store.current.asrFallbackApiKey,
+-                        model: $store.current.asrFallbackModel,
+-                        modelPlaceholder: "例如：FunAudioLLM/SenseVoiceSmall"
+-                    )
+-
+-                    // ASR Strategy
++                    // Language selector
+                     HStack {
+-                        Text("识别策略")
++                        Text("识别语言")
+                             .font(.system(size: 12, weight: .medium))
++                            .foregroundColor(.secondary)
+                         Spacer()
+-                        Picker("", selection: $store.current.asrStrategy) {
+-                            ForEach(ASRStrategy.allCases, id: \.self) { strategy in
+-                                Text(strategy.displayName).tag(strategy)
++                        Picker("", selection: $store.current.asrLanguage) {
++                            ForEach(WhisperLanguage.allCases, id: \.self) { lang in
++                                Text(lang.displayName).tag(lang)
+                             }
+                         }
+                         .pickerStyle(.segmented)
+-                        .frame(width: 260)
++                        .frame(width: 200)
++                    }
++
++                    // Microphone device selector
++                    HStack {
++                        Text("麦克风设备")
++                            .font(.system(size: 12, weight: .medium))
++                            .foregroundColor(.secondary)
++                        Spacer()
++                        HStack(spacing: 6) {
++                            if selectedDeviceUnavailable {
++                                Image(systemName: "exclamationmark.triangle.fill")
++                                    .font(.system(size: 10))
++                                    .foregroundColor(.orange)
++                            }
++                            Picker("", selection: $store.current.microphoneDeviceID) {
++                                Text("系统默认").tag(String?.none)
++                                ForEach(availableDevices) { device in
++                                    Text(device.name).tag(Optional(device.id))
++                                }
++                            }
++                            .pickerStyle(.menu)
++                            .frame(width: 220)
++                        }
++                    }
++                    .onAppear {
++                        refreshDevices()
+                     }
+-                    .padding(.horizontal, 4)
+                 }
+                 .padding(.horizontal, 4)
+ 
+@@ -264,15 +683,74 @@ struct SettingsView: View {
+                         .lineLimit(nil)
+                         .fixedSize(horizontal: false, vertical: true)
+ 
+-                    ServiceConfigCard(
+-                        title: "润色模型",
+-                        subtitle: "用于整理和优化识别结果",
+-                        provider: $store.current.llmProvider,
+-                        baseURL: $store.current.llmBaseURL,
+-                        apiKey: $store.current.llmApiKey,
+-                        model: $store.current.llmModel,
+-                        modelPlaceholder: "例如：deepseek-ai/DeepSeek-V3"
+-                    )
++                    // Provider list
++                    VStack(alignment: .leading, spacing: 8) {
++                        ForEach(store.current.llmProviders) { provider in
++                            ProviderRow(
++                                provider: provider,
++                                isActive: provider.isActive,
++                                onSetActive: {
++                                    setActiveProvider(provider.id)
++                                },
++                                onEdit: {
++                                    startEditing(provider)
++                                },
++                                onDelete: {
++                                    deleteProvider(provider.id)
++                                }
++                            )
++                        }
++                    }
++
++                    Button {
++                        draftProvider = LLMProvider(
++                            name: "",
++                            provider: "SiliconFlow",
++                            baseURL: "https://api.siliconflow.cn/v1",
++                            model: "",
++                            isActive: false
++                        )
++                        draftApiKey = ""
++                        showAddProvider = true
++                    } label: {
++                        Label("添加 Provider", systemImage: "plus.circle")
++                            .font(.system(size: 12))
++                    }
++                    .buttonStyle(.plain)
++                    .foregroundColor(.blue)
++
++                    // System Prompt Editor
++                    VStack(alignment: .leading, spacing: 6) {
++                        HStack {
++                            Text("系统提示词")
++                                .font(.system(size: 12, weight: .medium))
++                                .foregroundColor(.secondary)
++                            Spacer()
++                            Button("恢复默认") {
++                                store.current.systemPrompt = Configuration.default.systemPrompt
++                            }
++                            .font(.system(size: 11))
++                            .buttonStyle(.plain)
++                            .foregroundColor(.blue)
++                        }
++
++                        Text("双击触发键结束录音时，使用此提示词对识别结果进行润色。")
++                            .font(.system(size: 11))
++                            .foregroundColor(.secondary)
++                            .lineLimit(nil)
++                            .fixedSize(horizontal: false, vertical: true)
++
++                        TextEditor(text: $store.current.systemPrompt)
++                            .font(.system(size: 12))
++                            .frame(minHeight: 120, maxHeight: 200)
++                            .padding(4)
++                            .background(Color(nsColor: .textBackgroundColor))
++                            .clipShape(RoundedRectangle(cornerRadius: 6))
++                            .overlay(
++                                RoundedRectangle(cornerRadius: 6)
++                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
++                            )
++                    }
+                 }
+                 .padding(.horizontal, 4)
+ 
+@@ -300,8 +778,21 @@ struct SettingsView: View {
+                                     Text(key.displayName).tag(key)
+                                 }
+                             }
+-                            .pickerStyle(.segmented)
+-                            .frame(width: 280)
++                            .pickerStyle(.menu)
++                            .frame(width: 160)
++                        }
++
++                        VStack(alignment: .leading, spacing: 6) {
++                            Text("交互模式")
++                                .font(.system(size: 12, weight: .medium))
++                                .foregroundColor(.secondary)
++                            Picker("", selection: $store.current.interactionMode) {
++                                ForEach(InteractionMode.allCases, id: \.self) { mode in
++                                    Text(mode.displayName).tag(mode)
++                                }
++                            }
++                            .pickerStyle(.menu)
++                            .frame(width: 160)
+                         }
+ 
+                         Spacer()
+@@ -309,45 +800,68 @@ struct SettingsView: View {
+ 
+                     VStack(alignment: .leading, spacing: 10) {
+                         HStack(spacing: 12) {
+-                            HStack(spacing: 6) {
+-                                Image(systemName: "hand.tap.fill")
+-                                    .font(.system(size: 11))
+-                                    .foregroundColor(.blue)
+-                                VStack(alignment: .leading, spacing: 2) {
+-                                    Text("单击")
+-                                        .font(.system(size: 11, weight: .semibold))
+-                                    Text("停止录音，输出原始识别文本")
+-                                        .font(.system(size: 10))
+-                                        .foregroundColor(.secondary)
++                            if store.current.interactionMode == .tapToStart {
++                                HStack(spacing: 6) {
++                                    Image(systemName: "hand.tap.fill")
++                                        .font(.system(size: 11))
++                                        .foregroundColor(.blue)
++                                    VStack(alignment: .leading, spacing: 2) {
++                                        Text("单击")
++                                            .font(.system(size: 11, weight: .semibold))
++                                        Text("停止录音，输出原始识别文本")
++                                            .font(.system(size: 10))
++                                            .foregroundColor(.secondary)
++                                    }
+                                 }
+-                            }
+-                            .padding(.horizontal, 12)
+-                            .padding(.vertical, 8)
+-                            .background(Color.blue.opacity(0.08))
+-                            .clipShape(RoundedRectangle(cornerRadius: 8))
++                                .padding(.horizontal, 12)
++                                .padding(.vertical, 8)
++                                .background(Color.blue.opacity(0.08))
++                                .clipShape(RoundedRectangle(cornerRadius: 8))
+ 
+-                            HStack(spacing: 6) {
+-                                Image(systemName: "hand.tap.fill")
+-                                    .font(.system(size: 11))
+-                                    .foregroundColor(.purple)
+-                                Image(systemName: "hand.tap.fill")
+-                                    .font(.system(size: 11))
+-                                    .foregroundColor(.purple)
+-                                VStack(alignment: .leading, spacing: 2) {
+-                                    Text("双击")
+-                                        .font(.system(size: 11, weight: .semibold))
+-                                    Text("停止录音，输出润色后的文本")
+-                                        .font(.system(size: 10))
+-                                        .foregroundColor(.secondary)
++                                HStack(spacing: 6) {
++                                    Image(systemName: "hand.tap.fill")
++                                        .font(.system(size: 11))
++                                        .foregroundColor(.purple)
++                                    Image(systemName: "hand.tap.fill")
++                                        .font(.system(size: 11))
++                                        .foregroundColor(.purple)
++                                    VStack(alignment: .leading, spacing: 2) {
++                                        Text("双击")
++                                            .font(.system(size: 11, weight: .semibold))
++                                        Text("停止录音，输出润色后的文本")
++                                            .font(.system(size: 10))
++                                            .foregroundColor(.secondary)
++                                    }
+                                 }
++                                .padding(.horizontal, 12)
++                                .padding(.vertical, 8)
++                                .background(Color.purple.opacity(0.08))
++                                .clipShape(RoundedRectangle(cornerRadius: 8))
++                            } else {
++                                HStack(spacing: 6) {
++                                    Image(systemName: "hand.tap.fill")
++                                        .font(.system(size: 11))
++                                        .foregroundColor(.blue)
++                                    VStack(alignment: .leading, spacing: 2) {
++                                        Text("单击")
++                                            .font(.system(size: 11, weight: .semibold))
++                                        Text("开始 / 停止录音")
++                                            .font(.system(size: 10))
++                                            .foregroundColor(.secondary)
++                                    }
++                                }
++                                .padding(.horizontal, 12)
++                                .padding(.vertical, 8)
++                                .background(Color.blue.opacity(0.08))
++                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                             }
+-                            .padding(.horizontal, 12)
+-                            .padding(.vertical, 8)
+-                            .background(Color.purple.opacity(0.08))
+-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+ 
+                             Spacer()
+                         }
++
++                        Text("当前触发键：\(store.current.triggerKey.displayName)")
++                            .font(.system(size: 11))
++                            .foregroundColor(.secondary)
+                     }
+                 }
+                 .padding(.horizontal, 4)
+@@ -405,7 +919,18 @@ struct SettingsView: View {
+                 }
+                 .padding(.horizontal, 4)
+ 
+-                // Bottom spacer
++                // MARK: Diagnostics
++                HStack {
++                    Button(action: { AppLogger.openLogInFinder() }) {
++                        Label("查看诊断日志", systemImage: "doc.text.magnifyingglass")
++                            .font(.system(size: 12))
++                    }
++                    .buttonStyle(.plain)
++                    .foregroundColor(.blue)
++                    Spacer()
++                }
++                .padding(.horizontal, 4)
++
+                 Spacer(minLength: 20)
+             }
+             .padding(24)
+@@ -415,6 +940,12 @@ struct SettingsView: View {
+         .onAppear {
+             hasAccessibility = PermissionHelper.checkAccessibility()
+         }
++        .task {
++            while !Task.isCancelled {
++                try? await Task.sleep(for: .seconds(2))
++                hasAccessibility = PermissionHelper.checkAccessibility()
++            }
++        }
+         .onChange(of: store.current) { _, _ in
+             store.save(store.current)
+             WindowManager.shared.reloadHotkey()
+@@ -445,5 +976,90 @@ struct SettingsView: View {
+                 .transition(.move(edge: .top).combined(with: .opacity))
+             }
+         }
++        .sheet(isPresented: $showAddProvider) {
++            ProviderEditSheet(
++                provider: .init(
++                    get: { draftProvider },
++                    set: { draftProvider = $0 }
++                ),
++                apiKey: $draftApiKey,
++                existingProviders: store.current.llmProviders,
++                onSave: {
++                    let newProvider = LLMProvider(
++                        name: draftProvider.name,
++                        provider: draftProvider.provider,
++                        baseURL: draftProvider.baseURL,
++                        model: draftProvider.model,
++                        isActive: store.current.llmProviders.isEmpty
++                    )
++                    store.current.llmProviders.append(newProvider)
++                    if !draftApiKey.isEmpty {
++                        ConfigurationStore.shared.saveProviderAPIKey(draftApiKey, for: newProvider.id)
++                    }
++                    showAddProvider = false
++                },
++                onCancel: {
++                    showAddProvider = false
++                }
++            )
++        }
++        .sheet(item: $editingProvider) { provider in
++            let idx = store.current.llmProviders.firstIndex(where: { $0.id == provider.id }) ?? 0
++            let binding = Binding<LLMProvider>(
++                get: { store.current.llmProviders[idx] },
++                set: { store.current.llmProviders[idx] = $0 }
++            )
++            ProviderEditSheet(
++                provider: binding,
++                apiKey: .init(
++                    get: { ConfigurationStore.shared.loadProviderAPIKey(provider.id) ?? "" },
++                    set: { newKey in
++                        if !newKey.isEmpty {
++                            ConfigurationStore.shared.saveProviderAPIKey(newKey, for: provider.id)
++                        } else {
++                            ConfigurationStore.shared.deleteProviderAPIKey(provider.id)
++                        }
++                    }
++                ),
++                existingProviders: store.current.llmProviders,
++                onSave: {
++                    editingProvider = nil
++                },
++                onCancel: {
++                    editingProvider = nil
++                }
++            )
++        }
++    }
++
++    private func refreshDevices() {
++        availableDevices = AudioRecorder.availableInputDevices()
++        if let selectedID = store.current.microphoneDeviceID {
++            selectedDeviceUnavailable = !availableDevices.contains(where: { $0.id == selectedID })
++        } else {
++            selectedDeviceUnavailable = false
++        }
++    }
++
++    // MARK: - Provider Actions
++
++    private func setActiveProvider(_ id: UUID) {
++        for i in store.current.llmProviders.indices {
++            store.current.llmProviders[i].isActive = (store.current.llmProviders[i].id == id)
++        }
++    }
++
++    private func startEditing(_ provider: LLMProvider) {
++        editingProvider = provider
++    }
++
++    private func deleteProvider(_ id: UUID) {
++        let wasActive = store.current.llmProviders.first(where: { $0.id == id })?.isActive ?? false
++        store.current.llmProviders.removeAll(where: { $0.id == id })
++        ConfigurationStore.shared.deleteProviderAPIKey(id)
++        // Auto-activate another provider if the active one was deleted
++        if wasActive, !store.current.llmProviders.isEmpty {
++            store.current.llmProviders[0].isActive = true
++        }
+     }
+ }
+diff --git a/Sources/flowtype/Utilities/KeychainHelper.swift b/Sources/flowtype/Utilities/KeychainHelper.swift
+new file mode 100644
+index 0000000..29e3b47
+--- /dev/null
++++ b/Sources/flowtype/Utilities/KeychainHelper.swift
+@@ -0,0 +1,55 @@
++import Foundation
++import Security
++
++enum KeychainHelper {
++    private static let service = "com.flowtype.app"
++
++    static func save(key: String, value: String) -> Bool {
++        guard let data = value.data(using: .utf8) else { return false }
++
++        let query: [String: Any] = [
++            kSecClass as String: kSecClassGenericPassword,
++            kSecAttrService as String: service,
++            kSecAttrAccount as String: key,
++        ]
++
++        SecItemDelete(query as CFDictionary)
++
++        var addQuery = query
++        addQuery[kSecValueData as String] = data
++        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
++
++        let status = SecItemAdd(addQuery as CFDictionary, nil)
++        if status != errSecSuccess {
++            AppLogger.log("[KeychainHelper] save failed for '\(key)': \(status)")
++        }
++        return status == errSecSuccess
++    }
++
++    static func load(key: String) -> String? {
++        let query: [String: Any] = [
++            kSecClass as String: kSecClassGenericPassword,
++            kSecAttrService as String: service,
++            kSecAttrAccount as String: key,
++            kSecReturnData as String: true,
++            kSecMatchLimit as String: kSecMatchLimitOne,
++        ]
++
++        var result: AnyObject?
++        let status = SecItemCopyMatching(query as CFDictionary, &result)
++
++        guard status == errSecSuccess, let data = result as? Data else {
++            return nil
++        }
++        return String(data: data, encoding: .utf8)
++    }
++
++    static func delete(key: String) {
++        let query: [String: Any] = [
++            kSecClass as String: kSecClassGenericPassword,
++            kSecAttrService as String: service,
++            kSecAttrAccount as String: key,
++        ]
++        SecItemDelete(query as CFDictionary)
++    }
++}
+diff --git a/Sources/flowtype/WindowManager.swift b/Sources/flowtype/WindowManager.swift
+index 9d4d034..cde0cf8 100644
+--- a/Sources/flowtype/WindowManager.swift
++++ b/Sources/flowtype/WindowManager.swift
+@@ -6,6 +6,7 @@ import CoreGraphics
+ @preconcurrency import CoreFoundation
+ 
+ // MARK: - Option Tap Detector
++
+ /// Standalone tap detector that lives outside @MainActor isolation.
+ /// All access is serialized on the main thread (CGEventTap dispatches via
+ /// DispatchQueue.main.async, Timer fires on the runloop that created it).
+@@ -14,7 +15,7 @@ final class OptionTapDetector: @unchecked Sendable {
+ 
+     private let tapWindow: TimeInterval = 0.35
+     private var tapTimes: [Date] = []
+-    private var tapTimer: Timer?
++    private var tapTimer = CancellableTimer()
+ 
+     var onDoubleTap: (@Sendable () -> Void)?
+     var onSingleTap: (@Sendable () -> Void)?
+@@ -26,24 +27,22 @@ final class OptionTapDetector: @unchecked Sendable {
+         tapTimes.removeAll { now.timeIntervalSince($0) > tapWindow }
+ 
+         if tapTimes.count >= 2 {
+-            tapTimer?.invalidate()
+-            tapTimer = nil
++            tapTimer.cancel()
+             tapTimes.removeAll()
+-            print("[TapDetector] DOUBLE-TAP detected")
++            AppLogger.log("[TapDetector] DOUBLE-TAP detected")
+             onDoubleTap?()
+         } else {
+-            tapTimer?.invalidate()
+-            tapTimer = Timer.scheduledTimer(timeInterval: tapWindow,
+-                                            target: self,
+-                                            selector: #selector(timerFired),
+-                                            userInfo: nil,
+-                                            repeats: false)
+-            print("[TapDetector] Single tap, timer started (window: \(tapWindow)s)")
++            tapTimer.schedule(
++                timeInterval: tapWindow,
++                target: self,
++                selector: #selector(timerFired)
++            )
++            AppLogger.log("[TapDetector] Single tap, timer started (window: \(tapWindow)s)")
+         }
+     }
+ 
+     @objc private func timerFired() {
+-        print("[TapDetector] Timer fired, tapTimes.count=\(tapTimes.count)")
++        AppLogger.log("[TapDetector] Timer fired, tapTimes.count=\(tapTimes.count)")
+         if tapTimes.count == 1 {
+             tapTimes.removeAll()
+             onSingleTap?()
+@@ -53,34 +52,42 @@ final class OptionTapDetector: @unchecked Sendable {
+     }
+ }
+ 
+-// MARK: - Log Formatter
+-
+-private nonisolated(unsafe) let logDateFormatter: ISO8601DateFormatter = {
+-    let f = ISO8601DateFormatter()
+-    f.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+-    return f
+-}()
+-
+-// MARK: - WindowManager
++// MARK: - Window Manager
+ 
+ @MainActor
+ class WindowManager: ObservableObject {
+     static let shared = WindowManager()
+     var panel: FloatingPanel?
+-    private let orchestrator = PipelineOrchestrator.shared
+ 
+     private var eventTapPort: CFMachPort?
++    private var sessionStateCancellable: AnyCancellable?
++    private var reloadWorkItem: DispatchWorkItem?
++
++    /// Periodic timer to ensure the CGEvent tap stays enabled after system events.
++    private var eventTapHealthTimer = CancellableTimer()
++    private let eventTapHealthInterval: TimeInterval = 5.0
+ 
+     /// Current trigger key from configuration
+     private var triggerKey: TriggerKey { ConfigurationStore.shared.current.triggerKey }
+ 
+     /// Cached trigger key for safe access from C callback (avoids actor isolation issues)
+-    private nonisolated(unsafe) static var cachedTriggerKey: TriggerKey = .command
++    private static var cachedTriggerKey = UnsafeCell<TriggerKey>(.command)
++
++    /// Cached flag: true when a session is active (non-idle). Updated by SessionController
++    /// observer so the C callback can check without crossing actor isolation.
++    private static var cachedSessionActive = UnsafeCell<Bool>(false)
++
++    /// Cached interaction mode for safe access from C callback.
++    private static var cachedInteractionMode = UnsafeCell<InteractionMode>(.tapToStart)
++
++    /// Cached key-down timestamp for non-modifier trigger keys to enforce press-and-hold.
++    private static var cachedKeyDownTime = UnsafeCell<Date?>(nil)
++    private static let nonModifierHoldThreshold: TimeInterval = 0.2
+ 
+     init() {
+         let view = AnyView(
+             CapsuleView()
+-                .environmentObject(orchestrator.state)
++                .environmentObject(SessionController.shared)
+         )
+         panel = FloatingPanel(view: view)
+ 
+@@ -98,42 +105,82 @@ class WindowManager: ObservableObject {
+                 self.handleSingleTap()
+             }
+         }
++
++        sessionStateCancellable = SessionController.shared.$sessionState
++            .receive(on: DispatchQueue.main)
++            .sink { state in
++                let active: Bool
++                if case .idle = state { active = false } else { active = true }
++                Self.cachedSessionActive.value = active
++            }
+     }
+ 
+     // MARK: - Hotkey Setup
+ 
+     func setupGlobalHotkey() {
+-        Self.fileLog("[WindowManager] setupGlobalHotkey called")
++        AppLogger.log("[WindowManager] setupGlobalHotkey called")
+         let accessibilityEnabled = PermissionHelper.checkAccessibility()
+         if !accessibilityEnabled {
+-            Self.fileLog("[WindowManager] WARNING: Accessibility permission not granted")
++            AppLogger.log("[WindowManager] WARNING: Accessibility permission not granted")
+         }
+ 
+-        Self.cachedTriggerKey = triggerKey
+-        Self.fileLog("[WindowManager] Cached triggerKey: \(triggerKey.displayName)")
++        Self.cachedTriggerKey.value = triggerKey
++        Self.cachedInteractionMode.value = ConfigurationStore.shared.current.interactionMode
++        AppLogger.log("[WindowManager] Cached triggerKey: \(triggerKey.displayName), interactionMode: \(Self.cachedInteractionMode.value.displayName)")
+ 
+         setupCGEventTap()
+-        Self.fileLog("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
++        AppLogger.log("[WindowManager] Global hotkey registered (double-tap \(triggerKey.displayName) to start, single-tap to stop)")
+     }
+ 
+     func reloadHotkey() {
+-        Self.fileLog("[WindowManager] Reloading hotkey configuration...")
+-        Self.cachedTriggerKey = triggerKey
+-        if let tap = eventTapPort {
+-            CGEvent.tapEnable(tap: tap, enable: false)
+-            if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
+-                CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
++        AppLogger.log("[WindowManager] Queuing debounced hotkey reload...")
++        reloadWorkItem?.cancel()
++        let workItem = DispatchWorkItem { [weak self] in
++            guard let self = self else { return }
++            AppLogger.log("[WindowManager] Executing debounced reload...")
++            Self.cachedTriggerKey.value = self.triggerKey
++            Self.cachedInteractionMode.value = ConfigurationStore.shared.current.interactionMode
++            self.eventTapHealthTimer.cancel()
++            if let tap = self.eventTapPort {
++                CGEvent.tapEnable(tap: tap, enable: false)
++                if let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) {
++                    CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
++                }
++                CFMachPortInvalidate(tap)
++                self.eventTapPort = nil
++            }
++            self.setupCGEventTap()
++            AppLogger.log("[WindowManager] Hotkey reloaded with trigger key: \(self.triggerKey.displayName)")
++        }
++        reloadWorkItem = workItem
++        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
++    }
++
++    private func startEventTapHealthCheck() {
++        eventTapHealthTimer.schedule(
++            withTimeInterval: eventTapHealthInterval,
++            repeats: true
++        ) { [weak self] in
++            Task { @MainActor [weak self] in
++                guard let self = self else { return }
++                if let tap = self.eventTapPort {
++                    if !CGEvent.tapIsEnabled(tap: tap) {
++                        AppLogger.log("[WindowManager] Event tap was disabled by system, re-enabling...")
++                        CGEvent.tapEnable(tap: tap, enable: true)
++                    }
++                } else {
++                    AppLogger.log("[WindowManager] Event tap health check: tap is nil, re-creating...")
++                    self.setupCGEventTap()
++                }
+             }
+-            CFMachPortInvalidate(tap)
+-            eventTapPort = nil
+         }
+-        setupCGEventTap()
+-        Self.fileLog("[WindowManager] Hotkey reloaded with trigger key: \(triggerKey.displayName)")
+     }
+ 
+     private func setupCGEventTap() {
+-        Self.fileLog("[WindowManager] setupCGEventTap called")
++        AppLogger.log("[WindowManager] setupCGEventTap called")
+         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
++                      | CGEventMask(1 << CGEventType.keyDown.rawValue)
++                      | CGEventMask(1 << CGEventType.keyUp.rawValue)
+ 
+         guard let tap = CGEvent.tapCreate(
+             tap: .cgSessionEventTap,
+@@ -143,7 +190,7 @@ class WindowManager: ObservableObject {
+             callback: Self.eventTapCallback,
+             userInfo: Unmanaged.passUnretained(self).toOpaque()
+         ) else {
+-            Self.fileLog("[WindowManager] FAILED to create CGEvent tap")
++            AppLogger.log("[WindowManager] FAILED to create CGEvent tap")
+             return
+         }
+ 
+@@ -154,50 +201,104 @@ class WindowManager: ObservableObject {
+             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+         }
+         CGEvent.tapEnable(tap: tap, enable: true)
+-        Self.fileLog("[EventTap] CGEvent tap created and enabled successfully")
++        startEventTapHealthCheck()
++        AppLogger.log("[EventTap] CGEvent tap created and enabled successfully")
+     }
+ 
+-    /// Reliable file-based logger that works inside .app bundles where stdout is lost.
+-    /// Logs are written to ~/Library/Logs/flowtype/diagnostic.log for consistency.
+-    nonisolated static func fileLog(_ message: String) {
+-        let logDir = (NSHomeDirectory() as NSString)
+-            .appendingPathComponent("Library/Logs/flowtype")
+-        let path = (logDir as NSString).appendingPathComponent("diagnostic.log")
+-        let line = "[\(logDateFormatter.string(from: Date()))] \(message)\n"
+-        guard let data = line.data(using: .utf8) else { return }
+-
+-        do {
+-            try FileManager.default.createDirectory(
+-                atPath: logDir,
+-                withIntermediateDirectories: true,
+-                attributes: nil
+-            )
+-            if FileManager.default.fileExists(atPath: path) {
+-                let fh = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+-                fh.seekToEndOfFile()
+-                fh.write(data)
+-                fh.closeFile()
+-            } else {
+-                FileManager.default.createFile(atPath: path, contents: data, attributes: nil)
++    /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
++    /// Uses cachedTriggerKey / cachedSessionActive to avoid actor isolation issues from C callback context.
++    private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
++        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
++            if let refcon = refcon {
++                let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()
++                assert(WindowManager.shared === manager, "eventTapCallback refcon must point to the WindowManager singleton")
++                if let tap = manager.eventTapPort {
++                    CGEvent.tapEnable(tap: tap, enable: true)
++                }
+             }
+-        } catch {
+-            // Silent fail — logging should never crash the app
++            return Unmanaged.passRetained(event)
++        }
++
++        if type == .keyDown {
++            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
++            if keyCode == 53, cachedSessionActive.value {
++                AppLogger.log("[EventTap] Esc pressed during active session — cancelling")
++                DispatchQueue.main.async {
++                    SessionController.shared.cancel()
++                }
++                return nil
++            }
++
++            // Handle non-modifier trigger keys (F13, F14, F15, Caps Lock, Right Command)
++            if !cachedTriggerKey.value.isModifier,
++               let triggerKeyCode = cachedTriggerKey.value.keyCode,
++               keyCode == Int64(triggerKeyCode) {
++                cachedKeyDownTime.value = Date()
++                AppLogger.log("[EventTap] Non-modifier trigger key down, waiting for hold threshold...")
++                return nil
++            }
++
++            return Unmanaged.passRetained(event)
++        }
++
++        if type == .keyUp {
++            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
++            if !cachedTriggerKey.value.isModifier,
++               let triggerKeyCode = cachedTriggerKey.value.keyCode,
++               keyCode == Int64(triggerKeyCode) {
++                // Check if held long enough
++                let holdDuration: TimeInterval
++                if let downTime = cachedKeyDownTime.value {
++                    holdDuration = Date().timeIntervalSince(downTime)
++                } else {
++                    holdDuration = 0
++                }
++                cachedKeyDownTime.value = nil
++
++                guard holdDuration >= nonModifierHoldThreshold else {
++                    AppLogger.log("[EventTap] Non-modifier trigger key released too soon (\(String(format: "%.2f", holdDuration))s < \(nonModifierHoldThreshold)s), ignoring")
++                    return nil
++                }
++
++                let mode = cachedInteractionMode.value
++                if mode == .toggle {
++                    AppLogger.log("[EventTap] Non-modifier trigger key released after hold (toggle mode)")
++                    DispatchQueue.main.async {
++                        let controller = SessionController.shared
++                        if controller.isRecording {
++                            controller.endRecording(withPolish: false)
++                        } else {
++                            controller.startRecording()
++                        }
++                    }
++                } else {
++                    AppLogger.log("[EventTap] Non-modifier trigger key released after hold (tapToStart mode)")
++                    OptionTapDetector.shared.recordTap()
++                }
++                return nil
++            }
++            return Unmanaged.passRetained(event)
+         }
+-    }
+ 
+-    /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
+-    /// Uses cachedTriggerKey to avoid actor isolation issues from C callback context.
+-    private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
+         guard type == .flagsChanged else {
+             return Unmanaged.passRetained(event)
+         }
+ 
++        guard !KeyboardInjector.isInjecting.withLock({ $0 }) else {
++            return Unmanaged.passRetained(event)
++        }
++
+         let flags = event.flags
+-        let triggerFlag = cachedTriggerKey.cgEventFlag
+-        let isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
++        let triggerFlag = cachedTriggerKey.value.cgEventFlag
++        let isTriggerKeyNow: Bool
++        if let triggerFlag {
++            isTriggerKeyNow = (flags.rawValue & triggerFlag.rawValue) != 0
++        } else {
++            isTriggerKeyNow = false
++        }
+ 
+         if isTriggerKeyNow {
+-            fileLog("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.displayName))")
++            AppLogger.log("[EventTap] Trigger key pressed (flags=0x\(String(flags.rawValue, radix: 16)), trigger=\(cachedTriggerKey.value.displayName))")
+             OptionTapDetector.shared.recordTap()
+         }
+ 
+@@ -208,42 +309,53 @@ class WindowManager: ObservableObject {
+ 
+     @MainActor
+     private func handleDoubleTap() {
+-        let wasRecording = orchestrator.isRecording
+-        print("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording)")
++        let controller = SessionController.shared
++        let wasRecording = controller.isRecording
++        let mode = ConfigurationStore.shared.current.interactionMode
++        AppLogger.log("[WindowManager] handleDoubleTap — wasRecording=\(wasRecording), mode=\(mode)")
++
++        if mode == .toggle {
++            // In toggle mode, double-tap is same as single-tap
++            handleSingleTap()
++            return
++        }
+ 
+         if wasRecording {
+-            print("[WindowManager] → DOUBLE-TAP END (LLM polish)")
+-            orchestrator.beginEndModeDetection()
+-            orchestrator.confirmDoubleTapEnd()
+-            orchestrator.toggleRecording()
++            AppLogger.log("[WindowManager] → DOUBLE-TAP END (with LLM polish)")
++            controller.endRecording(withPolish: true)
+         } else {
+-            print("[WindowManager] → DOUBLE-TAP START recording")
+-            orchestrator.toggleRecording()
++            AppLogger.log("[WindowManager] → DOUBLE-TAP START recording")
++            controller.startRecording()
+         }
+     }
+ 
+     @MainActor
+     private func handleSingleTap() {
+-        print("[WindowManager] handleSingleTap — isRecording=\(orchestrator.isRecording)")
+-        if orchestrator.isRecording {
+-            print("[WindowManager] → SINGLE-TAP END (raw ASR)")
+-            orchestrator.toggleRecording()
+-        } else {
+-            print("[WindowManager] Single tap while idle, ignoring")
++        let controller = SessionController.shared
++        let mode = ConfigurationStore.shared.current.interactionMode
++        AppLogger.log("[WindowManager] handleSingleTap — isRecording=\(controller.isRecording), mode=\(mode)")
++
++        if mode == .toggle {
++            if controller.isRecording {
++                AppLogger.log("[WindowManager] → SINGLE-TAP END (raw ASR)")
++                controller.endRecording(withPolish: false)
++            } else {
++                AppLogger.log("[WindowManager] → SINGLE-TAP START recording")
++                controller.startRecording()
++            }
++            return
+         }
+-    }
+-
+-    // MARK: - Window Management
+ 
+-    func toggleWindow() {
+-        guard let panel = panel else { return }
+-        if panel.isVisible {
+-            panel.orderOut(nil)
++        if controller.isRecording {
++            AppLogger.log("[WindowManager] → SINGLE-TAP END (raw ASR)")
++            controller.endRecording(withPolish: false)
+         } else {
+-            showWindow()
++            AppLogger.log("[WindowManager] Single tap while idle, ignoring")
+         }
+     }
+ 
++    // MARK: - Window Management
++
+     func showWindow() {
+         guard let panel = panel else { return }
+         if let screen = NSScreen.main {
+@@ -251,13 +363,24 @@ class WindowManager: ObservableObject {
+             let y = screen.visibleFrame.minY + 40
+             panel.setFrameOrigin(NSPoint(x: x, y: y))
+         }
+-        panel.makeKeyAndOrderFront(nil)
++        panel.orderFront(nil)
+     }
+ 
+     func hide() {
++        // Don't hide the panel during text injection — user needs to see progress
++        guard SessionController.shared.sessionState != .injecting else { return }
+         panel?.orderOut(nil)
+     }
+ 
++    func toggleWindow() {
++        guard let panel = panel else { return }
++        if panel.isVisible {
++            panel.orderOut(nil)
++        } else {
++            showWindow()
++        }
++    }
++
+     func hideMainWindow() {
+         for window in NSApp.windows {
+             if window.title.isEmpty && !(window is FloatingPanel) {
+@@ -265,5 +388,4 @@ class WindowManager: ObservableObject {
+             }
+         }
+     }
+-
+ }

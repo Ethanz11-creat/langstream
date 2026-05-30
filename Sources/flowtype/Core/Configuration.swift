@@ -194,6 +194,7 @@ struct Configuration: Codable, Equatable {
     var dumpAudio: Bool = false
     var enableFillerStrip: Bool = true
     var enableTermCorrection: Bool = true
+    var maxRecordingDuration: Int = 600 // seconds, default 10 minutes
 
     // Module 2a: Microphone device selection
     var microphoneDeviceID: String? = nil
@@ -268,6 +269,7 @@ struct Configuration: Codable, Equatable {
         dumpAudio = (try? c.decode(Bool.self, forKey: .dumpAudio)) ?? d.dumpAudio
         enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
         enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
+        maxRecordingDuration = (try? c.decode(Int.self, forKey: .maxRecordingDuration)) ?? d.maxRecordingDuration
         systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? d.systemPrompt
         microphoneDeviceID = (try? c.decode(String?.self, forKey: .microphoneDeviceID)) ?? d.microphoneDeviceID
         hasCompletedOnboarding = (try? c.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? d.hasCompletedOnboarding
@@ -301,6 +303,7 @@ extension Configuration {
         case dumpAudio
         case enableFillerStrip
         case enableTermCorrection
+        case maxRecordingDuration
         case systemPrompt
         case microphoneDeviceID
         case hasCompletedOnboarding
@@ -320,6 +323,7 @@ extension Configuration {
         try container.encode(dumpAudio, forKey: .dumpAudio)
         try container.encode(enableFillerStrip, forKey: .enableFillerStrip)
         try container.encode(enableTermCorrection, forKey: .enableTermCorrection)
+        try container.encode(maxRecordingDuration, forKey: .maxRecordingDuration)
         try container.encode(systemPrompt, forKey: .systemPrompt)
         try container.encode(microphoneDeviceID, forKey: .microphoneDeviceID)
         try container.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
