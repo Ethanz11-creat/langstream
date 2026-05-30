@@ -479,9 +479,13 @@ final class SessionController: ObservableObject {
         )
         HistoryStore.shared.append(session)
 
-        // Auto-detect corrections for dictionary
+        // Auto-detect corrections for dictionary (off main thread)
         if sessionRawTranscript != finalText {
-            detectAndAddCorrections(raw: sessionRawTranscript, final: finalText)
+            let raw = sessionRawTranscript
+            let polished = finalText
+            Task { @MainActor in
+                detectAndAddCorrections(raw: raw, final: polished)
+            }
         }
 
         let hitIds = DictionaryStore.shared.detectHits(in: finalText)
@@ -496,9 +500,9 @@ final class SessionController: ObservableObject {
         let finalWords = final.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
 
         let rawSet = Set(rawWords.map { $0.lowercased() })
-        for word in finalWords {
+        for word in finalWords where word.count >= 2 {
             let lower = word.lowercased()
-            if !rawSet.contains(lower), word.count >= 2 {
+            if !rawSet.contains(lower) {
                 DictionaryStore.shared.addAutoDetected(phrase: word)
             }
         }

@@ -256,10 +256,14 @@ struct HistoryPage: View {
         }
     }
 
-    private func formatDateFile(_ date: Date) -> String {
+    private static let fileDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private func formatDateFile(_ date: Date) -> String {
+        Self.fileDateFormatter.string(from: date)
     }
 }
 

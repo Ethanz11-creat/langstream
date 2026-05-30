@@ -45,13 +45,12 @@ final class DictionaryStore: ObservableObject {
     }
 
     func addAutoDetected(phrase: String) {
-        let trimmed = phrase.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        guard !entries.contains(where: { $0.phrase.lowercased() == trimmed.lowercased() }) else { return }
-        let entry = DictionaryEntry(phrase: trimmed, source: .autoDetected)
+        guard !phrase.isEmpty else { return }
+        let entry = DictionaryEntry(phrase: phrase, source: .autoDetected)
+        guard !entries.contains(where: { $0.phrase.lowercased() == entry.phrase.lowercased() }) else { return }
         entries.append(entry)
         scheduleSave()
-        AppLogger.log("[DictionaryStore] Auto-added: \(trimmed)")
+        AppLogger.log("[DictionaryStore] Auto-added: \(entry.phrase)")
     }
 
     func remove(id: String) {

@@ -163,7 +163,6 @@ struct VocabPage: View {
 
 struct VocabTag: View {
     let entry: DictionaryEntry
-    @ObservedObject private var store = DictionaryStore.shared
 
     var body: some View {
         HStack(spacing: 4) {
@@ -185,7 +184,7 @@ struct VocabTag: View {
             }
 
             Button {
-                store.remove(id: entry.id)
+                DictionaryStore.shared.remove(id: entry.id)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -207,11 +206,11 @@ struct VocabTag: View {
         .opacity(entry.enabled ? 1.0 : 0.5)
         .contextMenu {
             Button(entry.enabled ? "禁用" : "启用") {
-                store.setEnabled(id: entry.id, !entry.enabled)
+                DictionaryStore.shared.setEnabled(id: entry.id, !entry.enabled)
             }
             Divider()
             Button("删除", role: .destructive) {
-                store.remove(id: entry.id)
+                DictionaryStore.shared.remove(id: entry.id)
             }
         }
     }

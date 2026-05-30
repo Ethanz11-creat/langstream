@@ -8,16 +8,6 @@ struct DailyStats: Codable, Identifiable {
 
     var id: String { date }
 
-    var formattedDuration: String {
-        let totalSeconds = Int(totalDurationMs / 1000)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        if hours > 0 {
-            return "\(hours) hr \(minutes) min"
-        }
-        return "\(minutes) min"
-    }
-
     var averageSpeed: Int {
         let totalMinutes = Double(totalDurationMs) / 1000.0 / 60.0
         guard totalMinutes > 0 else { return 0 }
@@ -54,8 +44,7 @@ final class DailyStatsStore: ObservableObject {
         }
         // Keep last 365 days
         if stats.count > 365 {
-            stats.sort { $0.date > $1.date }
-            stats = Array(stats.prefix(365))
+            stats.removeFirst(stats.count - 365)
         }
         scheduleSave()
     }
@@ -100,9 +89,13 @@ final class DailyStatsStore: ObservableObject {
         }
     }
 
-    private static var todayString: String {
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
+        return formatter
+    }()
+
+    private static var todayString: String {
+        dateFormatter.string(from: Date())
     }
 }
