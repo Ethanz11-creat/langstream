@@ -56,6 +56,12 @@ final class HistoryStore: ObservableObject {
             sessions = Array(sessions.prefix(maxEntries))
         }
         scheduleSave()
+
+        // Aggregate to daily stats
+        if let durationMs = session.durationMs {
+            let wordCount = session.finalText.count
+            DailyStatsStore.shared.recordSession(durationMs: durationMs, wordCount: wordCount)
+        }
     }
 
     func delete(id: String) {
