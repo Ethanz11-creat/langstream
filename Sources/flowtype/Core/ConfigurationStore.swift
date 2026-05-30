@@ -8,7 +8,7 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
 
     private let defaultsKey = "flowtype.config"
     private let migrationVersionKey = "flowtype.migrationVersion"
-    private let currentMigrationVersion = 3
+    private let currentMigrationVersion = 4
     private let keychainServicePrefix = "llmProvider."
 
     init() {
@@ -52,6 +52,11 @@ class ConfigurationStore: ObservableObject, @unchecked Sendable {
                     config.llmProviders = [oldProvider]
                     needsSave = true
                 }
+            }
+
+            if storedVersion < 4 {
+                // Migration 4: new fields have default values, just bump version
+                needsSave = true
             }
 
             UserDefaults.standard.set(currentMigrationVersion, forKey: migrationVersionKey)
