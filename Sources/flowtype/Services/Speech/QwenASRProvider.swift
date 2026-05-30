@@ -1,7 +1,45 @@
 import Foundation
-import Qwen3ASR
+@preconcurrency import Qwen3ASR
 import SpeechVAD
 import AudioCommon
+import os
+
+/// Thread-safe box for resuming a CheckedContinuation exactly once,
+/// supporting cancellation of an underlying synchronous operation.
+private final class CancellableContinuationBox<T: Sendable>: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock<Void>()
+    private var continuation: CheckedContinuation<T, Error>?
+    private var cancelled = false
+
+    func setContinuation(_ continuation: CheckedContinuation<T, Error>) {
+        lock.withLock {
+            if cancelled {
+                continuation.resume(throwing: CancellationError())
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+
+    func resume(returning value: T) {
+        lock.withLock {
+            if let cont = continuation {
+                continuation = nil
+                cont.resume(returning: value)
+            }
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            if let cont = continuation {
+                continuation = nil
+                cont.resume(throwing: CancellationError())
+            }
+        }
+    }
+}
 
 final class QwenASRProvider: @unchecked Sendable {
     let name: String = "QwenASR"
@@ -63,16 +101,22 @@ final class QwenASRProvider: @unchecked Sendable {
             noRepeatNgramSize: 3
         )
 
-        let text: String = try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = currentModel.transcribe(
-                    audio: samples,
-                    sampleRate: sampleRate,
-                    options: options
-                )
-                continuation.resume(returning: result)
+        let box = CancellableContinuationBox<String>()
+        let text: String = try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                box.setContinuation(continuation)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = currentModel.transcribe(
+                        audio: samples,
+                        sampleRate: sampleRate,
+                        options: options
+                    )
+                    box.resume(returning: result)
+                }
             }
-        }
+        }, onCancel: {
+            box.cancel()
+        })
 
         AppLogger.log("[QwenASR] Transcribed \(samples.count / sampleRate)s audio → \(text.count) chars")
         return text

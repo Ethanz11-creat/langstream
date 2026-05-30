@@ -98,16 +98,7 @@ struct CapsuleView: View {
         let config = ConfigurationStore.shared.current
         let key = config.triggerKey
         let mode = config.interactionMode
-
-        let keyName: String
-        switch key {
-        case .command: keyName = "⌘"
-        case .option: keyName = "⌥"
-        case .control: keyName = "⌃"
-        case .fn: keyName = "Fn"
-        case .rightCommand: keyName = "Right ⌘"
-        default: keyName = key.displayName
-        }
+        let keyName = key.symbolName
 
         if mode == .toggle {
             return "按 \(keyName) 切换语音输入"

@@ -50,6 +50,17 @@ enum TriggerKey: String, Codable, CaseIterable {
             return nil
         }
     }
+
+    var symbolName: String {
+        switch self {
+        case .command: return "⌘"
+        case .option: return "⌥"
+        case .control: return "⌃"
+        case .fn: return "Fn"
+        case .rightCommand: return "Right ⌘"
+        default: return displayName
+        }
+    }
 }
 
 enum InteractionMode: String, Codable, CaseIterable {

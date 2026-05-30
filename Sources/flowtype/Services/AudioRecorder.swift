@@ -33,6 +33,9 @@ final class AudioRecorder: @unchecked Sendable {
         stateLock.withLock { _isStopping }
     }
 
+    // Original default input device to restore after recording
+    private nonisolated(unsafe) var originalDeviceID: AudioObjectID = kAudioObjectUnknown
+
     // Diagnostics
     private struct HeartbeatState {
         var tapCallCount = 0
@@ -82,24 +85,41 @@ final class AudioRecorder: @unchecked Sendable {
 
         // Route to specific device if requested
         if let requestedDeviceID = deviceID {
-            if var audioDeviceID = AudioDeviceEnumerator.findDeviceID(uid: requestedDeviceID) {
+            if let audioDeviceID = AudioDeviceEnumerator.findDeviceID(uid: requestedDeviceID) {
                 AppLogger.log("[AudioRecorder] Routing to device: \(requestedDeviceID)")
+                // Save original default device
                 var propertyAddress = AudioObjectPropertyAddress(
                     mSelector: kAudioHardwarePropertyDefaultInputDevice,
                     mScope: kAudioObjectPropertyScopeGlobal,
                     mElement: kAudioObjectPropertyElementMain
                 )
+                var originalSize = UInt32(MemoryLayout<AudioObjectID>.size)
+                let originalResult = AudioObjectGetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &propertyAddress,
+                    0,
+                    nil,
+                    &originalSize,
+                    &originalDeviceID
+                )
+                if originalResult != noErr {
+                    AppLogger.log("[AudioRecorder] Failed to save original device: \(originalResult)")
+                    originalDeviceID = kAudioObjectUnknown
+                }
+                // Set requested device
                 var deviceIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
+                var mutableAudioDeviceID = audioDeviceID
                 let setResult = AudioObjectSetPropertyData(
                     AudioObjectID(kAudioObjectSystemObject),
                     &propertyAddress,
                     0,
                     nil,
                     deviceIDSize,
-                    &audioDeviceID
+                    &mutableAudioDeviceID
                 )
                 if setResult != noErr {
                     AppLogger.log("[AudioRecorder] Failed to set default input device: \(setResult), falling back")
+                    originalDeviceID = kAudioObjectUnknown
                 }
             } else {
                 AppLogger.log("[AudioRecorder] Requested device \(requestedDeviceID) not found, using default")
@@ -247,6 +267,32 @@ final class AudioRecorder: @unchecked Sendable {
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
+
+        // Restore original default input device if we changed it
+        if originalDeviceID != kAudioObjectUnknown {
+            var propertyAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var deviceIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
+            var mutableOriginalID = originalDeviceID
+            let restoreResult = AudioObjectSetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &propertyAddress,
+                0,
+                nil,
+                deviceIDSize,
+                &mutableOriginalID
+            )
+            if restoreResult != noErr {
+                AppLogger.log("[AudioRecorder] Failed to restore original input device: \(restoreResult)")
+            } else {
+                AppLogger.log("[AudioRecorder] Restored original input device")
+            }
+            originalDeviceID = kAudioObjectUnknown
+        }
+
         stateLock.withLock {
             _isStopping = false
         }

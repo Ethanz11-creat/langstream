@@ -1,9 +1,10 @@
 import CoreAudio
 
 struct AudioDevice: Identifiable, Equatable {
-    let id: String      // CoreAudio UID
-    let name: String    // 显示名称
-    let isDefault: Bool // 是否为系统默认输入设备
+    let id: String           // CoreAudio UID
+    let name: String         // 显示名称
+    let isDefault: Bool      // 是否为系统默认输入设备
+    let audioObjectID: AudioObjectID // CoreAudio device ID for routing
 }
 
 enum AudioDeviceEnumerator {
@@ -95,7 +96,7 @@ enum AudioDeviceEnumerator {
             let deviceName = (name as String?) ?? deviceUID
 
             let isDefault = (deviceID == defaultDeviceID)
-            devices.append(AudioDevice(id: deviceUID, name: deviceName, isDefault: isDefault))
+            devices.append(AudioDevice(id: deviceUID, name: deviceName, isDefault: isDefault, audioObjectID: deviceID))
         }
 
         // Sort: default first, then alphabetically
@@ -113,37 +114,6 @@ enum AudioDeviceEnumerator {
     /// Find device ID by UID for routing.
     static func findDeviceID(uid: String) -> AudioObjectID? {
         let devices = availableInputDevices()
-        guard devices.contains(where: { $0.id == uid }) else { return nil }
-
-        // Re-enumerate to get the AudioObjectID
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        let sizeResult = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize)
-        guard sizeResult == noErr else { return nil }
-
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        var deviceIDs = [AudioObjectID](repeating: 0, count: deviceCount)
-        var mutableSize = dataSize
-        let devicesResult = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &mutableSize, &deviceIDs)
-        guard devicesResult == noErr else { return nil }
-
-        for deviceID in deviceIDs {
-            var uidAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceUID,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var uidSize = UInt32(MemoryLayout<CFString?>.size)
-            var deviceUID: CFString?
-            let uidResult = AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, &deviceUID)
-            if uidResult == noErr, let foundUID = deviceUID as String?, foundUID == uid {
-                return deviceID
-            }
-        }
-        return nil
+        return devices.first(where: { $0.id == uid })?.audioObjectID
     }
 }

@@ -127,21 +127,7 @@ struct ASRPostProcessor {
     func correctTechTerms(_ text: String) -> String {
         var result = text
         for (pattern, replacement) in techTerms {
-            let escaped = pattern
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: ".", with: "\\.")
-                .replacingOccurrences(of: "+", with: "\\+")
-                .replacingOccurrences(of: "*", with: "\\*")
-                .replacingOccurrences(of: "?", with: "\\?")
-                .replacingOccurrences(of: "^", with: "\\^")
-                .replacingOccurrences(of: "$", with: "\\$")
-                .replacingOccurrences(of: "[", with: "\\[")
-                .replacingOccurrences(of: "]", with: "\\]")
-                .replacingOccurrences(of: "{", with: "\\{")
-                .replacingOccurrences(of: "}", with: "\\}")
-                .replacingOccurrences(of: "|", with: "\\|")
-                .replacingOccurrences(of: "(", with: "\\(")
-                .replacingOccurrences(of: ")", with: "\\)")
+            let escaped = NSRegularExpression.escapedPattern(for: pattern)
                 .replacingOccurrences(of: " ", with: "\\s+")
 
             let regexPattern = "(?i)(?<![a-zA-Z0-9_])\(escaped)(?![a-zA-Z0-9_])"

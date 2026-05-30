@@ -308,6 +308,7 @@ func normalizeBaseURL(_ url: String) -> String {
 struct ProviderEditSheet: View {
     @Binding var provider: LLMProvider
     @Binding var apiKey: String
+    var existingProviders: [LLMProvider]
     var onSave: () -> Void
     var onCancel: () -> Void
 
@@ -406,7 +407,7 @@ struct ProviderEditSheet: View {
         validationError = nil
 
         // Step 1: Validation
-        if let error = validateProvider(provider, existingProviders: []) {
+        if let error = validateProvider(provider, existingProviders: existingProviders) {
             validationError = error.localizedDescription
             return
         }
@@ -982,6 +983,7 @@ struct SettingsPage: View {
                     set: { draftProvider = $0 }
                 ),
                 apiKey: $draftApiKey,
+                existingProviders: store.current.llmProviders,
                 onSave: {
                     let newProvider = LLMProvider(
                         name: draftProvider.name,
@@ -1019,6 +1021,7 @@ struct SettingsPage: View {
                         }
                     }
                 ),
+                existingProviders: store.current.llmProviders,
                 onSave: {
                     editingProvider = nil
                 },
