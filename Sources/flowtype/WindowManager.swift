@@ -71,17 +71,17 @@ class WindowManager: ObservableObject {
     private var triggerKey: TriggerKey { ConfigurationStore.shared.current.triggerKey }
 
     /// Cached trigger key for safe access from C callback (avoids actor isolation issues)
-    private static var cachedTriggerKey = UnsafeCell<TriggerKey>(.command)
+    private static var cachedTriggerKey = MainThreadCachedValue<TriggerKey>(.command)
 
     /// Cached flag: true when a session is active (non-idle). Updated by SessionController
     /// observer so the C callback can check without crossing actor isolation.
-    private static var cachedSessionActive = UnsafeCell<Bool>(false)
+    private static var cachedSessionActive = MainThreadCachedValue<Bool>(false)
 
     /// Cached interaction mode for safe access from C callback.
-    private static var cachedInteractionMode = UnsafeCell<InteractionMode>(.tapToStart)
+    private static var cachedInteractionMode = MainThreadCachedValue<InteractionMode>(.tapToStart)
 
     /// Cached key-down timestamp for non-modifier trigger keys to enforce press-and-hold.
-    private static var cachedKeyDownTime = UnsafeCell<Date?>(nil)
+    private static var cachedKeyDownTime = MainThreadCachedValue<Date?>(nil)
     private static let nonModifierHoldThreshold: TimeInterval = 0.2
 
     init() {
@@ -208,6 +208,9 @@ class WindowManager: ObservableObject {
     /// CGEventTap callback — runs on the main thread since source is added to main RunLoop.
     /// Uses cachedTriggerKey / cachedSessionActive to avoid actor isolation issues from C callback context.
     private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
+        // Security: enforce that callback runs on main thread (all cached values are main-thread-only)
+        dispatchPrecondition(condition: .onQueue(.main))
+
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let refcon = refcon {
                 let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()

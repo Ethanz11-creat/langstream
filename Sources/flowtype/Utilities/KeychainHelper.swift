@@ -4,20 +4,28 @@ import Security
 enum KeychainHelper {
     private static let service = "com.flowtype.app"
 
+    /// Security: use kSecAttrAccessibleWhenUnlockedThisDeviceOnly to prevent
+    /// iCloud Keychain syncing of API keys, and kSecUseDataProtectionKeychain
+    /// for modern data-protection-based keychain on macOS.
+    private static var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+    }
+
     static func save(key: String, value: String) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-        ]
+        var deleteQuery = baseQuery
+        deleteQuery[kSecAttrAccount as String] = key
+        SecItemDelete(deleteQuery as CFDictionary)
 
-        SecItemDelete(query as CFDictionary)
-
-        var addQuery = query
+        var addQuery = baseQuery
+        addQuery[kSecAttrAccount as String] = key
         addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status != errSecSuccess {
@@ -27,13 +35,10 @@ enum KeychainHelper {
     }
 
     static func load(key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = baseQuery
+        query[kSecAttrAccount as String] = key
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -45,11 +50,8 @@ enum KeychainHelper {
     }
 
     static func delete(key: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-        ]
+        var query = baseQuery
+        query[kSecAttrAccount as String] = key
         SecItemDelete(query as CFDictionary)
     }
 }

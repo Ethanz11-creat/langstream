@@ -360,6 +360,11 @@ final class SessionController: ObservableObject {
         AppLogger.log("[SessionController#\(sessionID)] Injection phase started")
         let injectStart = Date()
 
+        // Security: capture target application before injection
+        let targetApp = NSWorkspace.shared.frontmostApplication
+        let targetBundleID = targetApp?.bundleIdentifier ?? "unknown"
+        AppLogger.log("[SessionController#\(sessionID)] Target app: \(targetBundleID)")
+
         sessionState = .injecting
         WindowManager.shared.hide()
 
@@ -367,6 +372,17 @@ final class SessionController: ObservableObject {
 
         guard activeSessionID == sessionID else {
             AppLogger.log("[SessionController#\(sessionID)] Session changed before injection, aborting")
+            resetToIdle()
+            return
+        }
+
+        // Security: verify target app hasn't changed before injecting
+        let currentApp = NSWorkspace.shared.frontmostApplication
+        if currentApp?.bundleIdentifier != targetBundleID {
+            AppLogger.log("[SessionController#\(sessionID)] Target app changed from \(targetBundleID) to \(currentApp?.bundleIdentifier ?? "nil"), aborting injection")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            showError("目标应用已切换，文本已复制到剪贴板")
             resetToIdle()
             return
         }

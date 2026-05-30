@@ -13,6 +13,11 @@ enum AppLogger {
         (logDir as NSString).appendingPathComponent("diagnostic.log")
     }()
 
+    /// Security: maximum log file size (10 MB) before rotation
+    private static let maxLogSize: UInt64 = 10 * 1024 * 1024
+    /// Security: maximum number of rotated log files to keep
+    private static let maxRotatedFiles = 3
+
     private nonisolated(unsafe) static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
@@ -43,12 +48,50 @@ enum AppLogger {
         guard let fh = fileHandle else { return }
         do {
             try fh.write(contentsOf: data)
+            // Check if rotation is needed after writing
+            try maybeRotateLog()
         } catch {
             try? fh.close()
             fileHandle = nil
             openHandle()
             try? fileHandle?.write(contentsOf: data)
         }
+    }
+
+    private static func maybeRotateLog() throws {
+        guard let fh = fileHandle else { return }
+        let currentOffset = fh.offsetInFile
+        if currentOffset < maxLogSize { return }
+
+        // Close current file and rotate
+        try fh.close()
+        fileHandle = nil
+
+        let fm = FileManager.default
+        let basePath = logPath
+
+        // Delete oldest if at max
+        let oldest = "\(basePath).\(maxRotatedFiles)"
+        if fm.fileExists(atPath: oldest) {
+            try? fm.removeItem(atPath: oldest)
+        }
+
+        // Shift existing rotated files
+        for i in (1..<maxRotatedFiles).reversed() {
+            let src = "\(basePath).\(i)"
+            let dst = "\(basePath).\(i + 1)"
+            if fm.fileExists(atPath: src) {
+                try? fm.moveItem(atPath: src, toPath: dst)
+            }
+        }
+
+        // Move current to .1
+        if fm.fileExists(atPath: basePath) {
+            try? fm.moveItem(atPath: basePath, toPath: "\(basePath).1")
+        }
+
+        // Create new file
+        fm.createFile(atPath: basePath, contents: nil, attributes: nil)
     }
 
     private static func openHandle() {

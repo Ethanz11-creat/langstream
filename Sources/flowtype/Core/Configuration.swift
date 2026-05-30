@@ -205,6 +205,10 @@ struct Configuration: Codable, Equatable {
     // Constants
     let temperature: Double = 0.3
     let maxTokens: Int = 2048
+
+    // Security: validated bounds
+    static let minRecordingDuration = 10   // seconds
+    static let maxRecordingDurationCap = 600 // seconds (10 minutes)
     var systemPrompt: String = """
     你是一位面向 AI 编码场景的语音指令整理助手。
 
@@ -269,7 +273,8 @@ struct Configuration: Codable, Equatable {
         dumpAudio = (try? c.decode(Bool.self, forKey: .dumpAudio)) ?? d.dumpAudio
         enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
         enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
-        maxRecordingDuration = (try? c.decode(Int.self, forKey: .maxRecordingDuration)) ?? d.maxRecordingDuration
+        let rawDuration = (try? c.decode(Int.self, forKey: .maxRecordingDuration)) ?? d.maxRecordingDuration
+        maxRecordingDuration = min(max(rawDuration, Configuration.minRecordingDuration), Configuration.maxRecordingDurationCap)
         systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? d.systemPrompt
         microphoneDeviceID = (try? c.decode(String?.self, forKey: .microphoneDeviceID)) ?? d.microphoneDeviceID
         hasCompletedOnboarding = (try? c.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? d.hasCompletedOnboarding

@@ -1,10 +1,9 @@
-/// A mutable cell for storing state in `@unchecked Sendable` types.
+/// A cached value that is written from `@MainActor` and read from a C callback
+/// that is guaranteed to dispatch on the main run loop.
 ///
-/// **Safety:** This struct is `@unchecked Sendable`; the caller must ensure
-/// that all accesses to `value` happen on the same thread or are otherwise
-/// synchronized. It exists solely to reduce the visual noise of
-/// `nonisolated(unsafe)` repeated across many properties.
-struct UnsafeCell<T>: @unchecked Sendable {
+/// **Safety:** All reads and writes must happen on the main thread.
+/// A `dispatchPrecondition` assertion in the callback enforces this at runtime.
+struct MainThreadCachedValue<T>: @unchecked Sendable {
     var value: T
     init(_ value: T) {
         self.value = value
