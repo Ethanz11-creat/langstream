@@ -32,8 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         WindowManager.shared.setupGlobalHotkey()
         AppLogger.log("[AppDelegate] Flowtype launched successfully")
 
-        let hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "flowtype.onboardingCompleted")
-        if !hasCompletedOnboarding {
+        if !ConfigurationStore.shared.current.hasCompletedOnboarding {
             showOnboarding()
         } else {
             let hasAccessibility = PermissionHelper.checkAccessibility()

@@ -8,6 +8,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private var statusItem: NSStatusItem?
     private var settingsWindowController: SettingsWindowController?
+    private var onboardingWindowController: OnboardingWindowController?
     private var statusMenuItem: NSMenuItem?
     private var sessionCancellable: AnyCancellable?
     private var modelCancellable: AnyCancellable?
@@ -107,6 +108,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let onboardingItem = NSMenuItem(title: "重新打开引导", action: #selector(showOnboarding), keyEquivalent: "")
+        onboardingItem.target = self
+        menu.addItem(onboardingItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let permissionItem = NSMenuItem(title: "检查权限", action: #selector(checkPermissions), keyEquivalent: "")
         permissionItem.target = self
         menu.addItem(permissionItem)
@@ -193,5 +200,17 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func showOnboarding() {
+        if onboardingWindowController == nil {
+            let controller = OnboardingWindowController()
+            controller.onClose = { [weak self] in
+                self?.onboardingWindowController = nil
+            }
+            onboardingWindowController = controller
+        }
+        onboardingWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
