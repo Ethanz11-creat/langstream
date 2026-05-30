@@ -184,6 +184,12 @@ struct Configuration: Codable, Equatable {
     var enableFillerStrip: Bool = true
     var enableTermCorrection: Bool = true
 
+    // Module 2a: Microphone device selection
+    var microphoneDeviceID: String? = nil
+
+    // Module 2b: Onboarding
+    var hasCompletedOnboarding: Bool = false
+
     // Constants
     let temperature: Double = 0.3
     let maxTokens: Int = 2048
@@ -252,6 +258,8 @@ struct Configuration: Codable, Equatable {
         enableFillerStrip = (try? c.decode(Bool.self, forKey: .enableFillerStrip)) ?? d.enableFillerStrip
         enableTermCorrection = (try? c.decode(Bool.self, forKey: .enableTermCorrection)) ?? d.enableTermCorrection
         systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? d.systemPrompt
+        microphoneDeviceID = (try? c.decode(String?.self, forKey: .microphoneDeviceID)) ?? d.microphoneDeviceID
+        hasCompletedOnboarding = (try? c.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? d.hasCompletedOnboarding
 
         // Try new multi-provider format first
         if let providers = try? c.decode([LLMProvider].self, forKey: .llmProviders), !providers.isEmpty {
@@ -283,6 +291,8 @@ extension Configuration {
         case enableFillerStrip
         case enableTermCorrection
         case systemPrompt
+        case microphoneDeviceID
+        case hasCompletedOnboarding
         // Legacy keys (for migration only, not stored properties)
         case llmProvider
         case llmBaseURL
@@ -300,6 +310,8 @@ extension Configuration {
         try container.encode(enableFillerStrip, forKey: .enableFillerStrip)
         try container.encode(enableTermCorrection, forKey: .enableTermCorrection)
         try container.encode(systemPrompt, forKey: .systemPrompt)
+        try container.encode(microphoneDeviceID, forKey: .microphoneDeviceID)
+        try container.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
     }
 }
 
