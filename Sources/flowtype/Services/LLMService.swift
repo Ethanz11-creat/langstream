@@ -56,24 +56,27 @@ actor LLMService {
 
     // MARK: - Provider Resolution
 
-    private func resolveActiveProvider(providers: [LLMProvider]) -> (provider: LLMProvider, apiKey: String)? {
-        // Find the active provider
+    private func resolveProviderChain(providers: [LLMProvider]) -> [(provider: LLMProvider, apiKey: String)] {
+        var result: [(provider: LLMProvider, apiKey: String)] = []
+
+        // Active provider first
         if let active = providers.first(where: \.isActive) {
             if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(active.id),
                !apiKey.isEmpty {
-                return (active, apiKey)
+                result.append((active, apiKey))
             }
         }
 
-        // Fallback to the first provider with a valid API key
+        // Then other providers with valid API keys
         for provider in providers {
+            if provider.isActive { continue } // Skip active, already added
             if let apiKey = ConfigurationStore.shared.loadProviderAPIKey(provider.id),
                !apiKey.isEmpty {
-                return (provider, apiKey)
+                result.append((provider, apiKey))
             }
         }
 
-        return nil
+        return result
     }
 
     // MARK: - Connection Test
@@ -150,25 +153,44 @@ actor LLMService {
                     return
                 }
 
-                guard let resolved = self.resolveActiveProvider(providers: config.llmProviders) else {
+                let chain = self.resolveProviderChain(providers: config.llmProviders)
+                guard !chain.isEmpty else {
                     continuation.finish(throwing: LLMError.apiError("请在设置中配置 LLM API Key"))
                     return
                 }
 
-                do {
-                    try await Self.streamRequest(
-                        apiKey: resolved.apiKey,
-                        baseURL: resolved.provider.baseURL,
-                        model: resolved.provider.model,
-                        temperature: temperature,
-                        systemPrompt: systemPrompt,
-                        userMessage: validatedText,
-                        maxTokens: maxTokens,
-                        timeoutSeconds: timeoutSeconds,
-                        continuation: continuation
-                    )
-                } catch {
-                    continuation.finish(throwing: error)
+                var lastError: Error?
+                let maxAttempts = min(chain.count, 2)
+                for i in 0..<maxAttempts {
+                    let resolved = chain[i]
+                    do {
+                        AppLogger.log("[LLMService] Trying provider \(resolved.provider.name) (attempt \(i+1)/\(maxAttempts))")
+                        try await Self.streamRequest(
+                            apiKey: resolved.apiKey,
+                            baseURL: resolved.provider.baseURL,
+                            model: resolved.provider.model,
+                            temperature: temperature,
+                            systemPrompt: systemPrompt,
+                            userMessage: validatedText,
+                            maxTokens: maxTokens,
+                            timeoutSeconds: timeoutSeconds,
+                            continuation: continuation
+                        )
+                        return // Success — streamRequest finished normally
+                    } catch {
+                        lastError = error
+                        AppLogger.log("[LLMService] Provider \(resolved.provider.name) failed: \(error)")
+                        if i < maxAttempts - 1 {
+                            AppLogger.log("[LLMService] Falling back to next provider...")
+                        }
+                    }
+                }
+
+                // All attempts exhausted
+                if let lastError = lastError {
+                    continuation.finish(throwing: lastError)
+                } else {
+                    continuation.finish(throwing: LLMError.apiError("所有 Provider 均不可用"))
                 }
             }
         }
