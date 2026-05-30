@@ -80,6 +80,10 @@ class WindowManager: ObservableObject {
     /// Cached interaction mode for safe access from C callback.
     private static var cachedInteractionMode = UnsafeCell<InteractionMode>(.tapToStart)
 
+    /// Cached key-down timestamp for non-modifier trigger keys to enforce press-and-hold.
+    private static var cachedKeyDownTime = UnsafeCell<Date?>(nil)
+    private static let nonModifierHoldThreshold: TimeInterval = 0.2
+
     init() {
         let view = AnyView(
             CapsuleView()
@@ -229,21 +233,8 @@ class WindowManager: ObservableObject {
             if !cachedTriggerKey.value.isModifier,
                let triggerKeyCode = cachedTriggerKey.value.keyCode,
                keyCode == Int64(triggerKeyCode) {
-                let mode = cachedInteractionMode.value
-                if mode == .toggle {
-                    AppLogger.log("[EventTap] Non-modifier trigger key pressed (toggle mode)")
-                    DispatchQueue.main.async {
-                        let controller = SessionController.shared
-                        if controller.isRecording {
-                            controller.endRecording(withPolish: false)
-                        } else {
-                            controller.startRecording()
-                        }
-                    }
-                } else {
-                    AppLogger.log("[EventTap] Non-modifier trigger key pressed (tapToStart mode)")
-                    OptionTapDetector.shared.recordTap()
-                }
+                cachedKeyDownTime.value = Date()
+                AppLogger.log("[EventTap] Non-modifier trigger key down, waiting for hold threshold...")
                 return nil
             }
 
@@ -255,8 +246,35 @@ class WindowManager: ObservableObject {
             if !cachedTriggerKey.value.isModifier,
                let triggerKeyCode = cachedTriggerKey.value.keyCode,
                keyCode == Int64(triggerKeyCode) {
-                // Non-modifier trigger key released — nothing to do here.
-                // State is managed on keyDown.
+                // Check if held long enough
+                let holdDuration: TimeInterval
+                if let downTime = cachedKeyDownTime.value {
+                    holdDuration = Date().timeIntervalSince(downTime)
+                } else {
+                    holdDuration = 0
+                }
+                cachedKeyDownTime.value = nil
+
+                guard holdDuration >= nonModifierHoldThreshold else {
+                    AppLogger.log("[EventTap] Non-modifier trigger key released too soon (\(String(format: "%.2f", holdDuration))s < \(nonModifierHoldThreshold)s), ignoring")
+                    return nil
+                }
+
+                let mode = cachedInteractionMode.value
+                if mode == .toggle {
+                    AppLogger.log("[EventTap] Non-modifier trigger key released after hold (toggle mode)")
+                    DispatchQueue.main.async {
+                        let controller = SessionController.shared
+                        if controller.isRecording {
+                            controller.endRecording(withPolish: false)
+                        } else {
+                            controller.startRecording()
+                        }
+                    }
+                } else {
+                    AppLogger.log("[EventTap] Non-modifier trigger key released after hold (tapToStart mode)")
+                    OptionTapDetector.shared.recordTap()
+                }
                 return nil
             }
             return Unmanaged.passRetained(event)
