@@ -397,11 +397,18 @@ final class SessionController: ObservableObject {
 
     private func startRecordingTimer() {
         elapsedSeconds = 0
+        let maxDuration = ConfigurationStore.shared.current.maxRecordingDuration
         recordingTimer.schedule(withTimeInterval: 1.0, repeats: true) { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.isRecording else { return }
                 self.elapsedSeconds += 1
                 self.sessionState = .recording(elapsedSeconds: self.elapsedSeconds)
+
+                // Auto-stop at max duration
+                if self.elapsedSeconds >= maxDuration {
+                    AppLogger.log("[SessionController] Recording reached max duration (\(maxDuration)s), auto-stopping")
+                    self.endRecording(withPolish: false)
+                }
             }
         }
     }
@@ -472,10 +479,29 @@ final class SessionController: ObservableObject {
         )
         HistoryStore.shared.append(session)
 
+        // Auto-detect corrections for dictionary
+        if sessionRawTranscript != finalText {
+            detectAndAddCorrections(raw: sessionRawTranscript, final: finalText)
+        }
+
         let hitIds = DictionaryStore.shared.detectHits(in: finalText)
         DictionaryStore.shared.incrementHits(ids: hitIds)
 
         AppLogger.log("[SessionController] History saved, dict hits: \(hitIds.count)")
+    }
+
+    private func detectAndAddCorrections(raw: String, final: String) {
+        // Simple word-level diff: find words in final that are not in raw
+        let rawWords = raw.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        let finalWords = final.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+
+        let rawSet = Set(rawWords.map { $0.lowercased() })
+        for word in finalWords {
+            let lower = word.lowercased()
+            if !rawSet.contains(lower), word.count >= 2 {
+                DictionaryStore.shared.addAutoDetected(phrase: word)
+            }
+        }
     }
 
     // MARK: - Reset

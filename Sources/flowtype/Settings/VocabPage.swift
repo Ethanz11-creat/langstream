@@ -83,7 +83,7 @@ struct VocabPage: View {
     // MARK: - Entry List
 
     private var entryList: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("词条列表")
                     .font(.system(size: 13, weight: .semibold))
@@ -93,56 +93,12 @@ struct VocabPage: View {
                     .foregroundColor(.secondary)
             }
 
-            ForEach(store.entries) { entry in
-                HStack(spacing: 10) {
-                    Toggle("", isOn: Binding(
-                        get: { entry.enabled },
-                        set: { store.setEnabled(id: entry.id, $0) }
-                    ))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.phrase)
-                            .font(.system(size: 13, weight: .medium))
-                        if let note = entry.note, !note.isEmpty {
-                            Text(note)
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    if entry.hits > 0 {
-                        Text("命中 \(entry.hits)")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.blue.opacity(0.1))
-                            .clipShape(Capsule())
-                    }
-
-                    Button {
-                        store.remove(id: entry.id)
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 12))
-                            .foregroundColor(.red.opacity(0.7))
-                    }
-                    .buttonStyle(.borderless)
+            // Tag grid
+            let columns = [GridItem(.adaptive(minimum: 100), spacing: 8)]
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(store.entries) { entry in
+                    VocabTag(entry: entry)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.secondary.opacity(0.08), lineWidth: 1)
-                )
             }
         }
     }
@@ -201,6 +157,62 @@ struct VocabPage: View {
             Text(text)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
+        }
+    }
+}
+
+struct VocabTag: View {
+    let entry: DictionaryEntry
+    @ObservedObject private var store = DictionaryStore.shared
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Source indicator
+            if entry.source == .autoDetected {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 9))
+                    .foregroundColor(.blue)
+            }
+
+            Text(entry.phrase)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+
+            if entry.hits > 0 {
+                Text("\(entry.hits)")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+
+            Button {
+                store.remove(id: entry.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 2)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(entry.enabled ? Color.blue.opacity(0.08) : Color.secondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(entry.enabled ? Color.blue.opacity(0.25) : Color.secondary.opacity(0.15), lineWidth: 1)
+        )
+        .opacity(entry.enabled ? 1.0 : 0.5)
+        .contextMenu {
+            Button(entry.enabled ? "禁用" : "启用") {
+                store.setEnabled(id: entry.id, !entry.enabled)
+            }
+            Divider()
+            Button("删除", role: .destructive) {
+                store.remove(id: entry.id)
+            }
         }
     }
 }

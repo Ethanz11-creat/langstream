@@ -1,5 +1,9 @@
 import Foundation
 
+enum EntrySource: String, Codable {
+    case manual, autoDetected
+}
+
 struct DictionaryEntry: Codable, Identifiable {
     let id: String
     var phrase: String
@@ -7,14 +11,16 @@ struct DictionaryEntry: Codable, Identifiable {
     var enabled: Bool
     var hits: UInt64
     let createdAt: Date
+    var source: EntrySource
 
-    init(phrase: String, note: String? = nil) {
+    init(phrase: String, note: String? = nil, source: EntrySource = .manual) {
         self.id = UUID().uuidString
-        self.phrase = phrase
+        self.phrase = phrase.trimmingCharacters(in: .whitespaces)
         self.note = note
         self.enabled = true
         self.hits = 0
         self.createdAt = Date()
+        self.source = source
     }
 }
 
@@ -36,6 +42,16 @@ final class DictionaryStore: ObservableObject {
         let entry = DictionaryEntry(phrase: phrase.trimmingCharacters(in: .whitespaces), note: note)
         entries.append(entry)
         scheduleSave()
+    }
+
+    func addAutoDetected(phrase: String) {
+        let trimmed = phrase.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        guard !entries.contains(where: { $0.phrase.lowercased() == trimmed.lowercased() }) else { return }
+        let entry = DictionaryEntry(phrase: trimmed, source: .autoDetected)
+        entries.append(entry)
+        scheduleSave()
+        AppLogger.log("[DictionaryStore] Auto-added: \(trimmed)")
     }
 
     func remove(id: String) {
