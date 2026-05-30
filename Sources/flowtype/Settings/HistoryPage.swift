@@ -48,6 +48,14 @@ struct HistoryPage: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 140)
 
+            Button {
+                exportSessions()
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(filteredSessions.isEmpty)
+
             Button(role: .destructive) {
                 showClearConfirm = true
             } label: {
@@ -213,6 +221,44 @@ struct HistoryPage: View {
     private func formatDateFull(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func exportSessions() {
+        let sessions = filteredSessions
+        guard !sessions.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json, .plainText]
+        panel.nameFieldStringValue = "flowtype_history_\(formatDateFile(Date()))"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let ext = url.pathExtension.lowercased()
+        do {
+            if ext == "json" {
+                let data = try JSONEncoder().encode(sessions)
+                try data.write(to: url)
+            } else {
+                // CSV
+                var csv = "Created At,Mode,Duration (s),Final Text\n"
+                for session in sessions {
+                    let date = formatDateFull(session.createdAt)
+                    let mode = session.polishMode.displayName
+                    let duration = session.durationMs.map { String(Double($0) / 1000.0) } ?? ""
+                    let text = session.finalText.replacingOccurrences(of: "\"", with: "\"\"")
+                    csv += "\"\(date)\",\"\(mode)\",\"\(duration)\",\"\(text)\"\n"
+                }
+                try csv.write(to: url, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            AppLogger.log("[HistoryPage] Export failed: \(error)")
+        }
+    }
+
+    private func formatDateFile(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
         return formatter.string(from: date)
     }
 }
