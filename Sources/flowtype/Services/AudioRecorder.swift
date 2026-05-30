@@ -72,13 +72,39 @@ final class AudioRecorder: @unchecked Sendable {
         return granted
     }
 
-    nonisolated func startRecording() async throws -> RecordingOutput {
+    nonisolated func startRecording(deviceID: String? = nil) async throws -> RecordingOutput {
         guard await requestPermission() else {
             throw AudioRecorderError.permissionDenied
         }
 
         let freshEngine = AVAudioEngine()
         self.engine = freshEngine
+
+        // Route to specific device if requested
+        if let requestedDeviceID = deviceID {
+            if var audioDeviceID = AudioDeviceEnumerator.findDeviceID(uid: requestedDeviceID) {
+                AppLogger.log("[AudioRecorder] Routing to device: \(requestedDeviceID)")
+                var propertyAddress = AudioObjectPropertyAddress(
+                    mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                var deviceIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
+                let setResult = AudioObjectSetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &propertyAddress,
+                    0,
+                    nil,
+                    deviceIDSize,
+                    &audioDeviceID
+                )
+                if setResult != noErr {
+                    AppLogger.log("[AudioRecorder] Failed to set default input device: \(setResult), falling back")
+                }
+            } else {
+                AppLogger.log("[AudioRecorder] Requested device \(requestedDeviceID) not found, using default")
+            }
+        }
 
         let inputNode = freshEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -181,6 +207,11 @@ final class AudioRecorder: @unchecked Sendable {
                 print("[AudioRecorder] Engine prepared and started successfully")
             } catch {
                 print("[AudioRecorder] Engine start FAILED: \(error)")
+                let nsError = error as NSError
+                if nsError.domain == "com.apple.coreaudio.avfaudio" {
+                    AppLogger.log("[AudioRecorder] CoreAudio error detected, device may have been disconnected")
+                    onRecordingFrozen?()
+                }
                 continuation.finish()
             }
         }
@@ -228,5 +259,9 @@ final class AudioRecorder: @unchecked Sendable {
             rawSamples.removeAll(keepingCapacity: false)
             return samples
         }
+    }
+
+    static func availableInputDevices() -> [AudioDevice] {
+        AudioDeviceEnumerator.availableInputDevices()
     }
 }
