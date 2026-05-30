@@ -17,20 +17,7 @@ struct CapsuleView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white)
 
-                HStack(spacing: 4) {
-                    if let timer = recordingTimerText {
-                        Text(timer)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(statusColor.opacity(0.7))
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-
-                    Text(statusSubtitle)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(statusColor.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
+                subtitleContent
             }
 
             Spacer()
@@ -130,6 +117,51 @@ struct CapsuleView: View {
             return session.previewText.isEmpty ? "输入中..." : session.previewText
         case .error(let msg):
             return msg
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleContent: some View {
+        if case .error = session.sessionState, !session.errorActions.isEmpty {
+            errorActionButtons
+        } else {
+            HStack(spacing: 4) {
+                if let timer = recordingTimerText {
+                    Text(timer)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(statusColor.opacity(0.7))
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                Text(statusSubtitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(statusColor.opacity(0.7))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+        }
+    }
+
+    private var errorActionButtons: some View {
+        HStack(spacing: 6) {
+            ForEach(session.errorActions, id: \.self) { action in
+                Button(action.displayName) {
+                    switch action {
+                    case .retry:
+                        session.retryPolish()
+                    case .copyRaw:
+                        if let text = session.lastErrorRawText {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(text, forType: .string)
+                        }
+                        session.dismissError()
+                    case .dismiss:
+                        session.dismissError()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.mini)
+                .tint(action == .dismiss ? .gray : .red)
+            }
         }
     }
 

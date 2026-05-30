@@ -63,6 +63,25 @@ final class SessionController: ObservableObject {
     private var sessionRawTranscript: String = ""
     private var sessionFinalText: String = ""
 
+    // MARK: - Error Retry Context
+
+    @Published private(set) var lastErrorRawText: String? = nil
+    @Published private(set) var errorActions: [ErrorAction] = []
+
+    enum ErrorAction: Equatable, Hashable {
+        case retry
+        case copyRaw
+        case dismiss
+
+        var displayName: String {
+            switch self {
+            case .retry: return "重试润色"
+            case .copyRaw: return "复制原文"
+            case .dismiss: return "忽略"
+            }
+        }
+    }
+
     // MARK: - Error Dismiss
 
     private var errorDismissTask: Task<Void, Never>?
@@ -114,6 +133,7 @@ final class SessionController: ObservableObject {
         previewDebounceTask = nil
 
         sessionState = .recording(elapsedSeconds: 0)
+        SoundFeedback.playRecordingStart()
         startRecordingTimer()
         WindowManager.shared.showWindow()
 
@@ -124,6 +144,7 @@ final class SessionController: ObservableObject {
     }
 
     func endRecording(withPolish: Bool) {
+        SoundFeedback.playRecordingStop()
         AppLogger.log("[SessionController#\(activeSessionID)] endRecording called, withPolish=\(withPolish)")
 
         guard isRecording else {
@@ -336,8 +357,9 @@ final class SessionController: ObservableObject {
                 return
             } catch {
                 AppLogger.log("[SessionController#\(id)] LLM polish failed: \(error)")
-                sessionState = .polishing(preview: "⚠️ 润色失败，使用原始文本")
-                try? await Task.sleep(nanoseconds: 800_000_000)
+                lastErrorRawText = textToUse
+                showError("润色失败", detail: error.localizedDescription, actions: [.retry, .copyRaw, .dismiss])
+                return
             }
 
             let finalText = polishedText ?? textToUse
@@ -461,20 +483,74 @@ final class SessionController: ObservableObject {
 
     // MARK: - Error
 
-    private func showError(_ message: String) {
+    private func showError(_ message: String, detail: String? = nil, actions: [ErrorAction] = [.dismiss]) {
+        SoundFeedback.playError()
         let errorSessionID = activeSessionID
         sessionState = .error(message)
+        self.errorActions = actions
         WindowManager.shared.showWindow()
         errorDismissTask?.cancel()
         errorDismissTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 3_000_000_000)
+                try await Task.sleep(nanoseconds: 5_000_000_000)
             } catch { return }
             guard let self else { return }
             if case .error = self.sessionState, self.activeSessionID == errorSessionID {
                 self.resetToIdle()
             }
         }
+    }
+
+    // MARK: - Error Actions
+
+    func retryPolish() {
+        guard let rawText = lastErrorRawText, !rawText.isEmpty else {
+            AppLogger.log("[SessionController] retryPolish: no raw text available")
+            return
+        }
+        guard case .error = sessionState else {
+            AppLogger.log("[SessionController] retryPolish: not in error state")
+            return
+        }
+        AppLogger.log("[SessionController#\(activeSessionID)] Retrying polish...")
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        useLLMPolish = true
+        hasInjected = false
+        sessionState = .polishing(preview: "")
+        processingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runPolishOnly(rawText: rawText, id: self.activeSessionID)
+        }
+    }
+
+    private func runPolishOnly(rawText: String, id: UInt64) async {
+        let composedPrompt = LLMService.composeSystemPrompt(
+            fallback: ConfigurationStore.shared.current.systemPrompt
+        )
+        do {
+            let stream = await llmService.polishText(rawText, systemPrompt: composedPrompt)
+            var accumulated = ""
+            for try await chunk in stream {
+                guard activeSessionID == id else { throw CancellationError() }
+                accumulated += chunk
+                sessionState = .polishing(preview: accumulated)
+            }
+            let finalText = accumulated.isEmpty || accumulated == rawText ? rawText : accumulated
+            await injectText(finalText, sessionID: id)
+        } catch is CancellationError {
+            resetToIdle()
+        } catch {
+            AppLogger.log("[SessionController#\(id)] Retry polish failed: \(error)")
+            showError("重试失败", detail: error.localizedDescription, actions: [.copyRaw, .dismiss])
+        }
+    }
+
+    func dismissError() {
+        guard case .error = sessionState else { return }
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        resetToIdle()
     }
 
     // MARK: - History
@@ -535,6 +611,8 @@ final class SessionController: ObservableObject {
         previewText = ""
         amplitude = 0.0
         pendingPreviewText = ""
+        lastErrorRawText = nil
+        errorActions = []
         recordingTask?.cancel()
         recordingTask = nil
         processingTask?.cancel()

@@ -905,6 +905,20 @@ struct SettingsPage: View {
                         Text("当前触发键：\(store.current.triggerKey.displayName)")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
+
+                        // Audio feedback toggle
+                        HStack {
+                            Image(systemName: "speaker.wave.2")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Text("录音开始/结束播放提示音")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Toggle("", isOn: $store.current.enableAudioFeedback)
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                        }
                     }
                 }
                 .padding(.horizontal, 4)
