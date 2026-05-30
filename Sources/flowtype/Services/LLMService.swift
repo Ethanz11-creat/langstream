@@ -6,6 +6,43 @@ enum LLMError: Error {
     case streamDecodingError
     case networkError(Error)
     case timeout
+
+    var userFriendlyMessage: String {
+        switch self {
+        case .invalidResponse:
+            return "无效响应格式"
+        case .apiError(let msg):
+            if msg.contains("401") || msg.contains("403") {
+                return "API Key 无效或已过期"
+            } else if msg.contains("404") {
+                return "模型 ID 不存在"
+            } else if msg.contains("500") || msg.contains("502") || msg.contains("503") {
+                return "服务商接口异常"
+            } else if msg.contains("超时") || msg.contains("timeout") {
+                return "连接超时"
+            }
+            return msg
+        case .streamDecodingError:
+            return "流数据解码失败"
+        case .networkError(let error):
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain {
+                switch nsError.code {
+                case NSURLErrorTimedOut, NSURLErrorDNSLookupFailed:
+                    return "连接超时，请检查网络或 Base URL"
+                case NSURLErrorCannotFindHost:
+                    return "无法解析 Base URL"
+                case NSURLErrorNotConnectedToInternet:
+                    return "网络未连接"
+                default:
+                    break
+                }
+            }
+            return "网络错误: \(error.localizedDescription)"
+        case .timeout:
+            return "请求超时"
+        }
+    }
 }
 
 actor LLMService {
