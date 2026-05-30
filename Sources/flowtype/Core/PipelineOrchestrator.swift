@@ -194,7 +194,8 @@ final class SessionController: ObservableObject {
             }
             try checkCancellation(id: id)
 
-            let output = try await audioRecorder.startRecording()
+            let deviceID = ConfigurationStore.shared.current.microphoneDeviceID
+            let output = try await audioRecorder.startRecording(deviceID: deviceID)
             AppLogger.log("[SessionController#\(id)] AudioRecorder started")
 
             // AppleSpeech real-time preview

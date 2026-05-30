@@ -575,6 +575,8 @@ struct SettingsPage: View {
     @ObservedObject private var store = ConfigurationStore.shared
     @State private var showSaved = false
     @State private var hasAccessibility = false
+    @State private var availableDevices: [AudioDevice] = []
+    @State private var selectedDeviceUnavailable: Bool = false
 
     // Provider sheet states
     @State private var showAddProvider = false
@@ -630,6 +632,32 @@ struct SettingsPage: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 200)
+                    }
+
+                    // Microphone device selector
+                    HStack {
+                        Text("麦克风设备")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        HStack(spacing: 6) {
+                            if selectedDeviceUnavailable {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.orange)
+                            }
+                            Picker("", selection: $store.current.microphoneDeviceID) {
+                                Text("系统默认").tag(String?.none)
+                                ForEach(availableDevices) { device in
+                                    Text(device.name).tag(Optional(device.id))
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 220)
+                        }
+                    }
+                    .onAppear {
+                        refreshDevices()
                     }
                 }
                 .padding(.horizontal, 4)
@@ -998,6 +1026,15 @@ struct SettingsPage: View {
                     editingProvider = nil
                 }
             )
+        }
+    }
+
+    private func refreshDevices() {
+        availableDevices = AudioRecorder.availableInputDevices()
+        if let selectedID = store.current.microphoneDeviceID {
+            selectedDeviceUnavailable = !availableDevices.contains(where: { $0.id == selectedID })
+        } else {
+            selectedDeviceUnavailable = false
         }
     }
 
