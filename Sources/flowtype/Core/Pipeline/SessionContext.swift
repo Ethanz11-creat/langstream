@@ -17,6 +17,24 @@ struct AppProfile {
 ///
 /// `SessionContext` is `@MainActor` because it is accessed from both the UI
 /// (SwiftUI views observing state changes) and the async pipeline stages.
+///
+/// ## Data Flow Architecture
+///
+/// There are two separate data paths from the pipeline to the UI:
+///
+/// 1. **Discrete state transitions** — `statePublisher` emits `SessionState` values
+///    (`.idle → .recording → .processing → ...`). These are coarse-grained,
+///    stage-driven transitions observed by both `SessionController` and `SessionObserver`s.
+///
+/// 2. **Continuous real-time data** — `amplitudePublisher` and `previewTextPublisher`
+///    stream high-frequency updates directly from `RecordingStage` to `SessionController`.
+///    This bypasses the 1-second timer polling that was used in the initial refactor,
+///    providing responsive amplitude visualization and preview text updates at the
+///    native frequency of the audio buffer callbacks.
+///
+/// Stages write real-time data to both the stored property (`currentAmplitude`)
+/// and the corresponding publisher, so the values remain inspectable for debugging
+/// while the publisher drives immediate UI updates.
 @MainActor
 final class SessionContext {
     /// Unique identifier for this session (monotonically increasing).
