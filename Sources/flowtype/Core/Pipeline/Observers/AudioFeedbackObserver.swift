@@ -13,7 +13,11 @@ final class AudioFeedbackObserver: SessionObserver {
             SoundFeedback.playRecordingStart()
         case (.recording, .processing):
             SoundFeedback.playRecordingStop()
-        case (_, .error):
+        case (.idle, .error),
+             (.recording, .error),
+             (.processing, .error),
+             (.polishing, .error),
+             (.injecting, .error):
             SoundFeedback.playError()
         default:
             break

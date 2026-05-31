@@ -25,6 +25,8 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
             AppLogger.log("[RecordingStage#\(sessionID)] Recording phase ended (duration: \(String(format: "%.1f", elapsed))s)")
         }
 
+        var previewTask: Task<Void, Never>?
+
         do {
             // 1. Request microphone permission
             let granted = await audioRecorder.requestPermission()
@@ -55,7 +57,7 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
             AppLogger.log("[RecordingStage#\(sessionID)] AppleSpeech preview started")
 
             // Consume preview stream and update preview text in real time
-            let previewTask = Task { [weak self] in
+            previewTask = Task { [weak self] in
                 guard self != nil else { return }
                 for await text in previewStream {
                     await MainActor.run {
@@ -75,7 +77,7 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
             AppLogger.log("[RecordingStage#\(sessionID)] Audio amplitude stream ended")
 
             // 5. Stop recording and collect results
-            previewTask.cancel()
+            previewTask?.cancel()
             cleanup()
 
             let finalPreviewText = appleSpeechProvider.stopStreamingRecognition()
@@ -89,6 +91,7 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
 
         } catch is CancellationError {
             AppLogger.log("[RecordingStage#\(sessionID)] Recording cancelled")
+            previewTask?.cancel()
             cleanup()
             let finalPreviewText = appleSpeechProvider.stopStreamingRecognition()
             let rawSamples = audioRecorder.takeAccumulatedSamples()

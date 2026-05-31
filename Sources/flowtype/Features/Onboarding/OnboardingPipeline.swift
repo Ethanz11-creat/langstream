@@ -36,6 +36,12 @@ struct DemoInjectionStage: PipelineStage {
 
     func execute(payload: StagePayload, context: SessionContext) async -> StageResult {
         guard case .polished(let text, _) = payload else { return .continue(payload) }
+
+        // Guard against double-delivery
+        let hasInjected = await MainActor.run { context.hasInjected }
+        guard !hasInjected else { return .complete }
+        await MainActor.run { context.hasInjected = true }
+
         await MainActor.run {
             NotificationCenter.default.post(name: .onboardingDemoTextReceived, object: text)
         }

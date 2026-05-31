@@ -51,6 +51,9 @@ final class SessionController: ObservableObject {
     private var recordingTimer = CancellableTimer()
     private var elapsedSeconds: Int = 0
 
+    /// Minimum amplitude change required to trigger a UI update (reduces unnecessary SwiftUI re-renders).
+    private let amplitudeUpdateThreshold: Float = 0.005
+
     // MARK: - Tasks
 
     private var currentTask: Task<Void, Never>?
@@ -340,7 +343,7 @@ final class SessionController: ObservableObject {
 
                 // Update amplitude and preview text from RecordingStage
                 if let ctx = self.currentContext {
-                    if abs(self.amplitude - ctx.currentAmplitude) > 0.005 {
+                    if abs(self.amplitude - ctx.currentAmplitude) > self.amplitudeUpdateThreshold {
                         self.amplitude = ctx.currentAmplitude
                     }
                     if ctx.currentPreviewText != self.previewText {
