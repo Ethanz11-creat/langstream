@@ -17,8 +17,6 @@ enum PipelineRegistry {
 
     /// Returns the default list of session observers.
     static func defaultObservers() -> [SessionObserver] {
-        [
-            AudioFeedbackObserver(isEnabled: { ConfigurationStore.shared.current.enableAudioFeedback }),
-        ]
+        [AudioFeedbackObserver()]
     }
 }

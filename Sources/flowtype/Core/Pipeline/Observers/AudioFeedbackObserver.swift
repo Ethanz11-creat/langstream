@@ -4,14 +4,9 @@ import Foundation
 
 /// Observes session state transitions and plays audio feedback sounds when enabled.
 final class AudioFeedbackObserver: SessionObserver {
-    let isEnabled: () -> Bool
-
-    init(isEnabled: @escaping () -> Bool) {
-        self.isEnabled = isEnabled
-    }
 
     func sessionDidTransition(from oldState: SessionState, to newState: SessionState, context: SessionContext) {
-        guard isEnabled() else { return }
+        guard ConfigurationStore.shared.current.enableAudioFeedback else { return }
 
         switch (oldState, newState) {
         case (_, .recording):

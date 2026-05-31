@@ -126,7 +126,6 @@ final class SessionController: ObservableObject {
             }
 
         transition(to: .recording(elapsedSeconds: 0), context: context)
-        SoundFeedback.playRecordingStart()
         startRecordingTimer()
         WindowManager.shared.showWindow()
 
@@ -134,7 +133,6 @@ final class SessionController: ObservableObject {
     }
 
     func endRecording(withPolish: Bool) {
-        SoundFeedback.playRecordingStop()
         AppLogger.log("[SessionController#\(activeSessionID)] endRecording called, withPolish=\(withPolish)")
 
         guard isRecording else {
@@ -304,7 +302,6 @@ final class SessionController: ObservableObject {
 
         // Auto-dismiss error after 5 seconds
         if case .error = newState {
-            SoundFeedback.playError()
             WindowManager.shared.showWindow()
             errorDismissTask?.cancel()
             let errorSessionID = activeSessionID
@@ -383,13 +380,11 @@ final class SessionController: ObservableObject {
         )
         HistoryStore.shared.append(session)
 
-        // Auto-detect corrections for dictionary (off main thread)
+        // Auto-detect corrections for dictionary
         if context.rawTranscript != context.finalText {
             let raw = context.rawTranscript
             let polished = context.finalText
-            Task { @MainActor in
-                self.detectAndAddCorrections(raw: raw, final: polished)
-            }
+            detectAndAddCorrections(raw: raw, final: polished)
         }
 
         let hitIds = DictionaryStore.shared.detectHits(in: context.finalText)
