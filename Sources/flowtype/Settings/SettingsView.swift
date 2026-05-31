@@ -578,6 +578,7 @@ struct SettingsPage: View {
     @State private var hasAccessibility = false
     @State private var availableDevices: [AudioDevice] = []
     @State private var selectedDeviceUnavailable: Bool = false
+    @State private var searchQuery: String = ""
 
     // Provider sheet states
     @State private var showAddProvider = false
@@ -601,6 +602,70 @@ struct SettingsPage: View {
                 }
                 .padding(.horizontal, 4)
 
+                // MARK: Search
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        TextField("搜索设置...", text: $searchQuery)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                        if !searchQuery.isEmpty {
+                            Button(action: { searchQuery = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+
+                    if !searchQuery.isEmpty {
+                        let matches = SettingRegistry.shared.search(searchQuery)
+                        if matches.isEmpty {
+                            Text("未找到匹配的设置")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 4)
+                        } else {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(matches.prefix(5), id: \.entry.id) { match in
+                                    HStack {
+                                        Text(match.entry.title)
+                                            .font(.system(size: 13))
+                                        Spacer()
+                                        Text(match.entry.category)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.secondary.opacity(0.12))
+                                            .clipShape(Capsule())
+                                    }
+                                    .padding(.horizontal, 4)
+                                    if match.entry.id != matches.prefix(5).last?.entry.id {
+                                        Divider()
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+                .padding(.horizontal, 4)
+
+                if searchQuery.isEmpty {
                 // MARK: ASR Section
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 8) {
@@ -989,6 +1054,7 @@ struct SettingsPage: View {
                 .padding(.horizontal, 4)
 
                 Spacer(minLength: 20)
+                }
             }
             .padding(24)
         }

@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import Combine
 
 // MARK: - Session State
 
@@ -19,10 +20,9 @@ enum SessionState: Equatable {
 final class SessionController: ObservableObject {
     static let shared = SessionController()
 
-    private let audioRecorder = AudioRecorder()
-    private let speechRouter = SpeechRouter()
-    private let llmService = LLMService()
-    private let appleSpeechProvider = AppleSpeechProvider()
+    private let pipeline: [PipelineStage]
+    private let observers: [SessionObserver]
+    private let speechRouter = SpeechRouter.shared
 
     var qwenProvider: QwenASRProvider { speechRouter.qwenProvider }
 
@@ -31,64 +31,34 @@ final class SessionController: ObservableObject {
     @Published private(set) var sessionState: SessionState = .idle
     @Published private(set) var amplitude: Float = 0.0
     @Published private(set) var previewText: String = ""
+    @Published private(set) var lastErrorRawText: String?
+    @Published private(set) var errorActions: [ErrorAction] = []
 
     // MARK: - Session Identity
 
     private var sessionID: UInt64 = 0
     private var activeSessionID: UInt64 = 0
-    private var useLLMPolish: Bool = false
+    private var currentContext: SessionContext?
 
-    // MARK: - Tasks
+    // MARK: - Error Recovery
 
-    private var recordingTask: Task<Void, Never>?
-    private var processingTask: Task<Void, Never>?
-    private var previewStreamTask: Task<Void, Never>?
+    private var suspendedContext: ErrorRecoveryContext?
+    private var suspendedPayload: StagePayload?
+    private var suspendedStageIndex: Int?
 
-    // MARK: - Recording Timer
+    // MARK: - Timer
 
     private var recordingTimer = CancellableTimer()
     private var elapsedSeconds: Int = 0
 
-    // MARK: - Preview Debounce
+    // MARK: - Tasks
 
-    private var previewDebounceTask: Task<Void, Never>?
-    private var pendingPreviewText: String = ""
-
-    // MARK: - Injection Guard
-
-    private var hasInjected: Bool = false
-
-    // MARK: - History Tracking
-
-    private var sessionRawTranscript: String = ""
-    private var sessionFinalText: String = ""
-
-    // MARK: - Error Retry Context
-
-    @Published private(set) var lastErrorRawText: String? = nil
-    @Published private(set) var errorActions: [ErrorAction] = []
-
-    enum ErrorAction: Equatable, Hashable {
-        case retry
-        case copyRaw
-        case dismiss
-
-        var displayName: String {
-            switch self {
-            case .retry: return "重试润色"
-            case .copyRaw: return "复制原文"
-            case .dismiss: return "忽略"
-            }
-        }
-    }
-
-    // MARK: - Error Dismiss
-
+    private var currentTask: Task<Void, Never>?
     private var errorDismissTask: Task<Void, Never>?
 
-    // MARK: - Diagnostics
+    // MARK: - Combine
 
-    private var recordingStartTime: Date?
+    private var stateCancellable: AnyCancellable?
 
     // MARK: - Computed
 
@@ -100,6 +70,16 @@ final class SessionController: ObservableObject {
     var isProcessing: Bool {
         if case .processing = sessionState { return true }
         return false
+    }
+
+    // MARK: - Initialization
+
+    init(
+        pipeline: [PipelineStage] = PipelineRegistry.defaultPipeline(),
+        observers: [SessionObserver] = PipelineRegistry.defaultObservers()
+    ) {
+        self.pipeline = pipeline
+        self.observers = observers
     }
 
     // MARK: - Public API
@@ -120,27 +100,37 @@ final class SessionController: ObservableObject {
         errorDismissTask = nil
 
         activeSessionID = newID
-        useLLMPolish = false
-        hasInjected = false
-        recordingStartTime = Date()
-        sessionRawTranscript = ""
-        sessionFinalText = ""
 
+        // Create session context
+        let statePublisher = PassthroughSubject<SessionState, Never>()
+        let context = SessionContext(sessionID: newID, statePublisher: statePublisher)
+        context.recordingStartTime = Date()
+        currentContext = context
+
+        // Reset state
         previewText = ""
         amplitude = 0.0
-        pendingPreviewText = ""
-        previewDebounceTask?.cancel()
-        previewDebounceTask = nil
 
-        sessionState = .recording(elapsedSeconds: 0)
+        // Subscribe to state publisher for intermediate updates from stages
+        stateCancellable = statePublisher
+            .filter { state in
+                // Timer handles recording state; orchestrator handles injecting
+                if case .recording = state { return false }
+                if case .injecting = state { return false }
+                return true
+            }
+            .sink { [weak self] state in
+                guard let self else { return }
+                guard let ctx = self.currentContext, ctx.sessionID == newID else { return }
+                self.transition(to: state, context: ctx)
+            }
+
+        transition(to: .recording(elapsedSeconds: 0), context: context)
         SoundFeedback.playRecordingStart()
         startRecordingTimer()
         WindowManager.shared.showWindow()
 
-        recordingTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runRecordingSession(id: newID)
-        }
+        executeStage(at: 0, payload: .empty, context: context)
     }
 
     func endRecording(withPolish: Bool) {
@@ -152,283 +142,192 @@ final class SessionController: ObservableObject {
             return
         }
 
-        useLLMPolish = withPolish
+        guard let context = currentContext else { return }
+
+        context.usePolish = withPolish
         stopRecordingTimer()
 
-        recordingTask?.cancel()
-        recordingTask = nil
+        currentTask?.cancel()
+        currentTask = nil
 
-        // Flush any pending preview debounce so the final preview text is complete
-        previewDebounceTask?.cancel()
-        previewDebounceTask = nil
-        if !pendingPreviewText.isEmpty {
-            previewText = pendingPreviewText
+        // Flush any pending preview text
+        if !previewText.isEmpty {
+            AppLogger.log("[SessionController#\(activeSessionID)] Final preview: \(previewText.count) chars")
         }
 
         let providerName = speechRouter.qwenProvider.isLoaded ? "Qwen3-ASR" : "AppleSpeech"
-        sessionState = .processing(provider: providerName)
-
-        processingTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runProcessingSession(id: self.activeSessionID)
-        }
+        transition(to: .processing(provider: providerName), context: context)
     }
 
     func cancel() {
         AppLogger.log("[SessionController#\(activeSessionID)] cancel called, state=\(sessionState)")
 
-        recordingTask?.cancel()
-        recordingTask = nil
-        processingTask?.cancel()
-        processingTask = nil
-        previewStreamTask?.cancel()
-        previewStreamTask = nil
-
-        audioRecorder.onAudioBuffer = nil
-        audioRecorder.onRecordingFrozen = nil
-        audioRecorder.stopRecording()
-        _ = appleSpeechProvider.stopStreamingRecognition()
+        currentTask?.cancel()
+        currentTask = nil
 
         resetToIdle()
         AppLogger.log("[SessionController] Cancelled — session reset to idle")
     }
 
-    // MARK: - Recording Phase
-
-    private func runRecordingSession(id: UInt64) async {
-        AppLogger.log("[SessionController#\(id)] Recording phase started")
-        let recordingStart = Date()
-
-        defer {
-            let elapsed = Date().timeIntervalSince(recordingStart)
-            AppLogger.log("[SessionController#\(id)] Recording phase ended (duration: \(String(format: "%.1f", elapsed))s)")
+    func retryPolish() {
+        guard case .error = sessionState else {
+            AppLogger.log("[SessionController] retryPolish: not in error state")
+            return
+        }
+        guard suspendedContext != nil else {
+            AppLogger.log("[SessionController] retryPolish: no recovery context")
+            return
+        }
+        guard let payload = suspendedPayload else {
+            AppLogger.log("[SessionController] retryPolish: no suspended payload")
+            return
+        }
+        guard let stageIndex = suspendedStageIndex else {
+            AppLogger.log("[SessionController] retryPolish: no suspended stage index")
+            return
+        }
+        guard let context = currentContext else {
+            AppLogger.log("[SessionController] retryPolish: no current context")
+            return
         }
 
-        do {
-            let granted = await audioRecorder.requestPermission()
-            guard granted else {
-                let status = audioRecorder.authorizationStatus()
-                let msg = micPermissionMessage(status: status)
-                showError(msg)
-                AppLogger.log("[SessionController#\(id)] Mic permission denied (status=\(status))")
-                return
-            }
-            try checkCancellation(id: id)
+        AppLogger.log("[SessionController#\(activeSessionID)] Retrying polish...")
 
-            let deviceID = ConfigurationStore.shared.current.microphoneDeviceID
-            let output = try await audioRecorder.startRecording(deviceID: deviceID)
-            AppLogger.log("[SessionController#\(id)] AudioRecorder started")
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
 
-            // AppleSpeech real-time preview
-            audioRecorder.onAudioBuffer = { [weak self] buffer in
-                self?.appleSpeechProvider.appendAudioBuffer(buffer)
-            }
-            let previewStream = await appleSpeechProvider.startStreamingRecognition()
-            AppLogger.log("[SessionController#\(id)] AppleSpeech preview started")
+        clearSuspension()
 
-            self.previewStreamTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                for await text in previewStream {
-                    guard self.activeSessionID == id else { break }
-                    self.updatePreviewText(text)
-                }
-            }
+        // Force polish on retry
+        context.usePolish = true
+        context.hasInjected = false
 
-            AppLogger.log("[SessionController#\(id)] Recording in progress")
-            for await amp in output.amplitude {
-                try checkCancellation(id: id)
-                if abs(self.amplitude - amp) > 0.005 {
-                    self.amplitude = amp
-                }
-            }
-            AppLogger.log("[SessionController#\(id)] Audio amplitude stream ended")
-
-        } catch is CancellationError {
-            AppLogger.log("[SessionController#\(id)] Recording cancelled")
-        } catch {
-            AppLogger.log("[SessionController#\(id)] Recording failed: \(error)")
-            showError("录音启动失败: \(error.localizedDescription)")
-        }
+        executeStage(at: stageIndex, payload: payload, context: context)
     }
 
-    // MARK: - Processing Phase
-
-    private func runProcessingSession(id: UInt64) async {
-        AppLogger.log("[SessionController#\(id)] Processing phase started")
-        let processingStartTime = Date()
-
-        defer {
-            let totalProcessingTime = Date().timeIntervalSince(processingStartTime)
-            if let recStart = recordingStartTime {
-                let totalSessionTime = Date().timeIntervalSince(recStart)
-                AppLogger.log("[SessionController#\(id)] ===== TIMING SUMMARY =====")
-                AppLogger.log("[SessionController#\(id)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
-                AppLogger.log("[SessionController#\(id)] Processing time: \(String(format: "%.1f", totalProcessingTime))s")
-            }
-            AppLogger.log("[SessionController#\(id)] Processing phase ended (total: \(String(format: "%.1f", totalProcessingTime))s)")
-        }
-
-        let stopAudioStart = Date()
-        audioRecorder.stopRecording()
-        audioRecorder.onAudioBuffer = nil
-        audioRecorder.onRecordingFrozen = nil
-        AppLogger.log("[SessionController#\(id)] AudioRecorder stopped in \(String(format: "%.2f", Date().timeIntervalSince(stopAudioStart)))s")
-
-        let localPreviewText = appleSpeechProvider.stopStreamingRecognition()
-        AppLogger.log("[SessionController#\(id)] AppleSpeech final preview: \(localPreviewText.count) chars")
-
-        let rawSamples = audioRecorder.takeAccumulatedSamples()
-        let audioDuration = Double(rawSamples.count) / 16000.0
-        AppLogger.log("[SessionController#\(id)] Raw samples: \(rawSamples.count) (\(String(format: "%.1f", audioDuration))s)")
-
-        var finalASRText = ""
-
-        if speechRouter.qwenProvider.isLoaded && !rawSamples.isEmpty {
-            AppLogger.log("[SessionController#\(id)] Using Qwen3-ASR batch transcription")
-            sessionState = .processing(provider: "Qwen3-ASR")
-
-            let asrStart = Date()
-            do {
-                finalASRText = try await speechRouter.qwenProvider.transcribe(
-                    samples: rawSamples,
-                    language: nil,
-                    context: nil
-                )
-                AppLogger.log("[SessionController#\(id)] Qwen3-ASR completed in \(String(format: "%.2f", Date().timeIntervalSince(asrStart)))s: \(finalASRText.count) chars")
-                guard activeSessionID == id else {
-                    AppLogger.log("[SessionController#\(id)] Session changed after transcription, discarding result")
-                    throw CancellationError()
-                }
-            } catch is CancellationError {
-                AppLogger.log("[SessionController#\(id)] Qwen3-ASR cancelled")
-                resetToIdle()
-                return
-            } catch {
-                AppLogger.log("[SessionController#\(id)] Qwen3-ASR failed: \(error)")
-                finalASRText = ""
-            }
-        }
-
-        if finalASRText.isEmpty, !localPreviewText.isEmpty {
-            AppLogger.log("[SessionController#\(id)] Using AppleSpeech preview as fallback")
-            finalASRText = localPreviewText
-        }
-
-        let postProcessStart = Date()
-        let processedText = ASRPostProcessor.process(finalASRText)
-        let textToUse = processedText.isEmpty ? finalASRText.trimmingCharacters(in: .whitespaces) : processedText
-        AppLogger.log("[SessionController#\(id)] Post-processed in \(String(format: "%.2f", Date().timeIntervalSince(postProcessStart)))s: \(textToUse.count) chars")
-
-        guard !textToUse.isEmpty else {
-            AppLogger.log("[SessionController#\(id)] Empty text, aborting")
-            showError("语音识别结果为空")
-            resetToIdle()
-            return
-        }
-
-        sessionRawTranscript = textToUse
-
-        if useLLMPolish {
-            let polishStart = Date()
-            sessionState = .polishing(preview: "")
-
-            let composedPrompt = LLMService.composeSystemPrompt(
-                fallback: ConfigurationStore.shared.current.systemPrompt
-            )
-
-            var polishedText: String? = nil
-            do {
-                let stream = await llmService.polishText(textToUse, systemPrompt: composedPrompt)
-                var accumulated = ""
-                for try await chunk in stream {
-                    guard activeSessionID == id else { throw CancellationError() }
-                    accumulated += chunk
-                    sessionState = .polishing(preview: accumulated)
-                }
-                if !accumulated.isEmpty && accumulated != textToUse {
-                    polishedText = accumulated
-                    AppLogger.log("[SessionController#\(id)] LLM polished in \(String(format: "%.1f", Date().timeIntervalSince(polishStart)))s: \(accumulated.count) chars")
-                } else {
-                    AppLogger.log("[SessionController#\(id)] LLM returned empty/same, using raw")
-                }
-            } catch is CancellationError {
-                AppLogger.log("[SessionController#\(id)] LLM polish cancelled")
-                resetToIdle()
-                return
-            } catch {
-                AppLogger.log("[SessionController#\(id)] LLM polish failed: \(error)")
-                lastErrorRawText = textToUse
-                showError("润色失败", detail: error.localizedDescription, actions: [.retry, .copyRaw, .dismiss])
-                return
-            }
-
-            let finalText = polishedText ?? textToUse
-            await injectText(finalText, sessionID: id)
-        } else {
-            AppLogger.log("[SessionController#\(id)] Using raw ASR text (single-tap end)")
-            await injectText(textToUse, sessionID: id)
-        }
+    private func clearSuspension() {
+        lastErrorRawText = nil
+        errorActions = []
+        suspendedContext = nil
+        suspendedPayload = nil
+        suspendedStageIndex = nil
     }
 
-    // MARK: - Injection Phase
-
-    private func injectText(_ text: String, sessionID: UInt64) async {
-        guard !hasInjected else {
-            AppLogger.log("[SessionController#\(sessionID)] Duplicate injection blocked")
-            resetToIdle()
-            return
-        }
-        hasInjected = true
-        AppLogger.log("[SessionController#\(sessionID)] Injection phase started")
-        let injectStart = Date()
-
-        // Security: capture target application before injection
-        let targetApp = NSWorkspace.shared.frontmostApplication
-        let targetBundleID = targetApp?.bundleIdentifier ?? "unknown"
-        AppLogger.log("[SessionController#\(sessionID)] Target app: \(targetBundleID)")
-
-        sessionState = .injecting
-        WindowManager.shared.hide()
-
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
-        guard activeSessionID == sessionID else {
-            AppLogger.log("[SessionController#\(sessionID)] Session changed before injection, aborting")
-            resetToIdle()
-            return
-        }
-
-        // Security: verify target app hasn't changed before injecting
-        let currentApp = NSWorkspace.shared.frontmostApplication
-        if currentApp?.bundleIdentifier != targetBundleID {
-            AppLogger.log("[SessionController#\(sessionID)] Target app changed from \(targetBundleID) to \(currentApp?.bundleIdentifier ?? "nil"), aborting injection")
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            showError("目标应用已切换，文本已复制到剪贴板")
-            resetToIdle()
-            return
-        }
-
-        do {
-            try await KeyboardInjector.insertText(text)
-            AppLogger.log("[SessionController#\(sessionID)] Text injected successfully in \(String(format: "%.2f", Date().timeIntervalSince(injectStart)))s")
-        } catch {
-            AppLogger.log("[SessionController#\(sessionID)] Injection failed: \(error)")
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            showError("已复制到剪贴板")
-            resetToIdle()
-            return
-        }
-
-        saveHistory(finalText: text)
-
+    func dismissError() {
+        guard case .error = sessionState else { return }
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        clearSuspension()
         resetToIdle()
-        if let recStart = recordingStartTime {
-            let totalSessionTime = Date().timeIntervalSince(recStart)
-            AppLogger.log("[SessionController#\(sessionID)] ===== SESSION COMPLETE =====")
-            AppLogger.log("[SessionController#\(sessionID)] Total session time: \(String(format: "%.1f", totalSessionTime))s")
+    }
+
+    func copyRawText() {
+        guard let rawText = suspendedContext?.rawText else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rawText, forType: .string)
+    }
+
+    // MARK: - Orchestration
+
+    private func executeStage(at index: Int, payload: StagePayload, context: SessionContext) {
+        guard activeSessionID == context.sessionID else {
+            AppLogger.log("[SessionController] Session \(context.sessionID) no longer active, aborting pipeline")
+            return
         }
+        guard index < pipeline.count else {
+            return transition(to: .idle, context: context)
+        }
+
+        let stage = pipeline[index]
+
+        // Pre-stage state transitions
+        if stage is InjectionStage {
+            transition(to: .injecting, context: context)
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            let result = await stage.execute(payload: payload, context: context)
+
+            guard self.activeSessionID == context.sessionID else {
+                AppLogger.log("[SessionController] Session \(context.sessionID) no longer active, ignoring stage result")
+                return
+            }
+
+            switch result {
+            case .continue(let nextPayload):
+                // Extract text for history tracking
+                switch nextPayload {
+                case .processed(_, let raw):
+                    context.rawTranscript = raw
+                case .polished(let final, let raw):
+                    context.rawTranscript = raw
+                    context.finalText = final
+                default:
+                    break
+                }
+                self.executeStage(at: index + 1, payload: nextPayload, context: context)
+
+            case .skip(let targetName, let nextPayload):
+                if let targetIndex = self.pipeline.firstIndex(where: { $0.name == targetName }) {
+                    self.executeStage(at: targetIndex, payload: nextPayload, context: context)
+                }
+
+            case .suspend(let recovery):
+                self.suspendedContext = recovery
+                self.suspendedPayload = payload
+                self.suspendedStageIndex = index
+                self.lastErrorRawText = recovery.rawText
+                self.errorActions = self.buildErrorActions(from: recovery)
+                self.transition(to: .error(recovery.error.localizedDescription), context: context)
+
+            case .complete:
+                self.transition(to: .idle, context: context)
+            }
+        }
+
+        currentTask = task
+    }
+
+    // MARK: - State Transition
+
+    private func transition(to newState: SessionState, context: SessionContext) {
+        let oldState = sessionState
+
+        // Save history on successful completion
+        if case .idle = newState, case .injecting = oldState, !context.finalText.isEmpty {
+            saveHistory(context: context)
+        }
+
+        sessionState = newState
+        observers.forEach { $0.sessionDidTransition(from: oldState, to: newState, context: context) }
+
+        // Auto-dismiss error after 5 seconds
+        if case .error = newState {
+            SoundFeedback.playError()
+            WindowManager.shared.showWindow()
+            errorDismissTask?.cancel()
+            let errorSessionID = activeSessionID
+            errorDismissTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch { return }
+                guard let self else { return }
+                if case .error = self.sessionState, self.activeSessionID == errorSessionID {
+                    self.dismissError()
+                }
+            }
+        }
+    }
+
+    // MARK: - Error Actions
+
+    private func buildErrorActions(from recovery: ErrorRecoveryContext) -> [ErrorAction] {
+        var actions: [ErrorAction] = []
+        if recovery.retryable { actions.append(.retry) }
+        if recovery.rawText != nil { actions.append(.copyRaw) }
+        actions.append(.dismiss)
+        return actions
     }
 
     // MARK: - Timer
@@ -456,131 +355,34 @@ final class SessionController: ObservableObject {
         elapsedSeconds = 0
     }
 
-    // MARK: - Preview Debounce
-
-    private func updatePreviewText(_ text: String) {
-        if case .recording = sessionState, text.isEmpty, !previewText.isEmpty {
-            return
-        }
-        guard text != pendingPreviewText else { return }
-        pendingPreviewText = text
-
-        if previewText.isEmpty, !text.isEmpty {
-            previewText = text
-            return
-        }
-
-        previewDebounceTask?.cancel()
-        previewDebounceTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 250_000_000)
-            } catch { return }
-            guard let self else { return }
-            self.previewText = self.pendingPreviewText
-            self.previewDebounceTask = nil
-        }
-    }
-
-    // MARK: - Error
-
-    private func showError(_ message: String, detail: String? = nil, actions: [ErrorAction] = [.dismiss]) {
-        SoundFeedback.playError()
-        let errorSessionID = activeSessionID
-        sessionState = .error(message)
-        self.errorActions = actions
-        WindowManager.shared.showWindow()
-        errorDismissTask?.cancel()
-        errorDismissTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 5_000_000_000)
-            } catch { return }
-            guard let self else { return }
-            if case .error = self.sessionState, self.activeSessionID == errorSessionID {
-                self.resetToIdle()
-            }
-        }
-    }
-
-    // MARK: - Error Actions
-
-    func retryPolish() {
-        guard let rawText = lastErrorRawText, !rawText.isEmpty else {
-            AppLogger.log("[SessionController] retryPolish: no raw text available")
-            return
-        }
-        guard case .error = sessionState else {
-            AppLogger.log("[SessionController] retryPolish: not in error state")
-            return
-        }
-        AppLogger.log("[SessionController#\(activeSessionID)] Retrying polish...")
-        errorDismissTask?.cancel()
-        errorDismissTask = nil
-        useLLMPolish = true
-        hasInjected = false
-        sessionState = .polishing(preview: "")
-        processingTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runPolishOnly(rawText: rawText, id: self.activeSessionID)
-        }
-    }
-
-    private func runPolishOnly(rawText: String, id: UInt64) async {
-        let composedPrompt = LLMService.composeSystemPrompt(
-            fallback: ConfigurationStore.shared.current.systemPrompt
-        )
-        do {
-            let stream = await llmService.polishText(rawText, systemPrompt: composedPrompt)
-            var accumulated = ""
-            for try await chunk in stream {
-                guard activeSessionID == id else { throw CancellationError() }
-                accumulated += chunk
-                sessionState = .polishing(preview: accumulated)
-            }
-            let finalText = accumulated.isEmpty || accumulated == rawText ? rawText : accumulated
-            await injectText(finalText, sessionID: id)
-        } catch is CancellationError {
-            resetToIdle()
-        } catch {
-            AppLogger.log("[SessionController#\(id)] Retry polish failed: \(error)")
-            showError("重试失败", detail: error.localizedDescription, actions: [.copyRaw, .dismiss])
-        }
-    }
-
-    func dismissError() {
-        guard case .error = sessionState else { return }
-        errorDismissTask?.cancel()
-        errorDismissTask = nil
-        resetToIdle()
-    }
-
     // MARK: - History
 
-    private func saveHistory(finalText: String) {
+    private func saveHistory(context: SessionContext) {
         let durationMs: UInt64?
-        if let recStart = recordingStartTime {
+        if let recStart = context.recordingStartTime {
             durationMs = UInt64(Date().timeIntervalSince(recStart) * 1000)
         } else {
             durationMs = nil
         }
-        let mode: PolishMode = useLLMPolish ? (StylePackStore.shared.activePack?.baseMode ?? .structured) : .raw
+        let mode: PolishMode = context.usePolish ? (StylePackStore.shared.activePack?.baseMode ?? .structured) : .raw
         let session = DictationSession(
-            rawTranscript: sessionRawTranscript,
-            finalText: finalText,
+            rawTranscript: context.rawTranscript,
+            finalText: context.finalText,
             polishMode: mode,
             durationMs: durationMs
         )
         HistoryStore.shared.append(session)
 
         // Auto-detect corrections for dictionary (off main thread)
-        if sessionRawTranscript != finalText {
-            let raw = sessionRawTranscript
-            let polished = finalText
+        if context.rawTranscript != context.finalText {
+            let raw = context.rawTranscript
+            let polished = context.finalText
             Task { @MainActor in
-                detectAndAddCorrections(raw: raw, final: polished)
+                self.detectAndAddCorrections(raw: raw, final: polished)
             }
         }
 
-        let hitIds = DictionaryStore.shared.detectHits(in: finalText)
+        let hitIds = DictionaryStore.shared.detectHits(in: context.finalText)
         DictionaryStore.shared.incrementHits(ids: hitIds)
 
         AppLogger.log("[SessionController] History saved, dict hits: \(hitIds.count)")
@@ -605,25 +407,21 @@ final class SessionController: ObservableObject {
     private func resetToIdle() {
         sessionState = .idle
         activeSessionID = 0
-        useLLMPolish = false
-        hasInjected = false
-        recordingStartTime = nil
-        previewText = ""
-        amplitude = 0.0
-        pendingPreviewText = ""
+        currentContext = nil
+        stateCancellable?.cancel()
+        stateCancellable = nil
         lastErrorRawText = nil
         errorActions = []
-        recordingTask?.cancel()
-        recordingTask = nil
-        processingTask?.cancel()
-        processingTask = nil
-        previewDebounceTask?.cancel()
-        previewDebounceTask = nil
-        previewStreamTask?.cancel()
-        previewStreamTask = nil
+        suspendedContext = nil
+        suspendedPayload = nil
+        suspendedStageIndex = nil
+        currentTask?.cancel()
+        currentTask = nil
         errorDismissTask?.cancel()
         errorDismissTask = nil
         stopRecordingTimer()
+        previewText = ""
+        amplitude = 0.0
         WindowManager.shared.hide()
     }
 
@@ -633,21 +431,22 @@ final class SessionController: ObservableObject {
         sessionID += 1
         return sessionID
     }
+}
 
-    private func checkCancellation(id: UInt64) throws {
-        guard activeSessionID == id else {
-            throw CancellationError()
-        }
-        try Task.checkCancellation()
-    }
+// MARK: - ErrorAction
 
-    private func micPermissionMessage(status: Int) -> String {
-        if status == 0 {
-            return "麦克风权限未响应。请先退出 Flowtype，重新打开后再试一次。"
-        } else if status == 1 {
-            return "麦克风权限已拒绝。请前往「系统设置 → 隐私与安全性 → 麦克风」，找到 Flowtype 并开启。"
-        } else {
-            return "请在系统设置中允许麦克风访问"
+extension SessionController {
+    enum ErrorAction: Equatable, Hashable {
+        case retry
+        case copyRaw
+        case dismiss
+
+        var displayName: String {
+            switch self {
+            case .retry: return "重试润色"
+            case .copyRaw: return "复制原文"
+            case .dismiss: return "忽略"
+            }
         }
     }
 }
