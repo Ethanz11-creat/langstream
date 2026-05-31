@@ -42,7 +42,7 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
                 ))
             }
 
-            try checkCancellation()
+            try Task.checkCancellation()
 
             // 2. Start audio recording
             let deviceID = ConfigurationStore.shared.current.microphoneDeviceID
@@ -62,6 +62,7 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
                 for await text in previewStream {
                     await MainActor.run {
                         context.currentPreviewText = text
+                        context.previewTextPublisher.send(text)
                     }
                 }
             }
@@ -69,9 +70,10 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
             // 4. Consume amplitude stream and update amplitude in real time
             AppLogger.log("[RecordingStage#\(sessionID)] Recording in progress")
             for await amp in output.amplitude {
-                try checkCancellation()
+                try Task.checkCancellation()
                 await MainActor.run {
                     context.currentAmplitude = amp
+                    context.amplitudePublisher.send(amp)
                 }
             }
             AppLogger.log("[RecordingStage#\(sessionID)] Audio amplitude stream ended")
@@ -110,10 +112,6 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
     }
 
     // MARK: - Helpers
-
-    private func checkCancellation() throws {
-        try Task.checkCancellation()
-    }
 
     private func cleanup() {
         audioRecorder.stopRecording()

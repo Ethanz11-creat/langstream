@@ -62,6 +62,8 @@ final class SessionController: ObservableObject {
     // MARK: - Combine
 
     private var stateCancellable: AnyCancellable?
+    private var amplitudeCancellable: AnyCancellable?
+    private var previewCancellable: AnyCancellable?
 
     // MARK: - Computed
 
@@ -126,6 +128,20 @@ final class SessionController: ObservableObject {
                 guard let self else { return }
                 guard let ctx = self.currentContext, ctx.sessionID == newID else { return }
                 self.transition(to: state, context: ctx)
+            }
+
+        // Subscribe to real-time amplitude/preview publishers (avoids 1Hz timer polling)
+        amplitudeCancellable = context.amplitudePublisher
+            .sink { [weak self] amp in
+                guard let self else { return }
+                if abs(self.amplitude - amp) > self.amplitudeUpdateThreshold {
+                    self.amplitude = amp
+                }
+            }
+        previewCancellable = context.previewTextPublisher
+            .sink { [weak self] text in
+                guard let self else { return }
+                self.previewText = text
             }
 
         transition(to: .recording(elapsedSeconds: 0), context: context)
@@ -341,16 +357,6 @@ final class SessionController: ObservableObject {
                 self.elapsedSeconds += 1
                 self.sessionState = .recording(elapsedSeconds: self.elapsedSeconds)
 
-                // Update amplitude and preview text from RecordingStage
-                if let ctx = self.currentContext {
-                    if abs(self.amplitude - ctx.currentAmplitude) > self.amplitudeUpdateThreshold {
-                        self.amplitude = ctx.currentAmplitude
-                    }
-                    if ctx.currentPreviewText != self.previewText {
-                        self.previewText = ctx.currentPreviewText
-                    }
-                }
-
                 // Auto-stop at max duration
                 if self.elapsedSeconds >= maxDuration {
                     AppLogger.log("[SessionController] Recording reached max duration (\(maxDuration)s), auto-stopping")
@@ -418,6 +424,10 @@ final class SessionController: ObservableObject {
         currentContext = nil
         stateCancellable?.cancel()
         stateCancellable = nil
+        amplitudeCancellable?.cancel()
+        amplitudeCancellable = nil
+        previewCancellable?.cancel()
+        previewCancellable = nil
         lastErrorRawText = nil
         errorActions = []
         suspendedContext = nil

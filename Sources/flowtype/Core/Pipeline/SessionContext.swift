@@ -60,6 +60,12 @@ final class SessionContext {
     /// Current AppleSpeech preview text (updated by RecordingStage during recording).
     var currentPreviewText: String = ""
 
+    /// Publishers for real-time amplitude updates (bypasses 1s timer polling).
+    let amplitudePublisher = PassthroughSubject<Float, Never>()
+
+    /// Publisher for real-time preview text updates (bypasses 1s timer polling).
+    let previewTextPublisher = PassthroughSubject<String, Never>()
+
     // MARK: - Initialization
 
     init(sessionID: UInt64, statePublisher: PassthroughSubject<SessionState, Never>) {
