@@ -54,24 +54,22 @@ final class RecordingStage: PipelineStage, @unchecked Sendable {
             let previewStream = await appleSpeechProvider.startStreamingRecognition()
             AppLogger.log("[RecordingStage#\(sessionID)] AppleSpeech preview started")
 
-            // Consume preview stream to keep it alive — final text collected at end
+            // Consume preview stream and update preview text in real time
             let previewTask = Task { [weak self] in
                 guard self != nil else { return }
-                for await _ in previewStream {
-                    // Preview text is accumulated internally by AppleSpeechProvider;
-                    // UI updates are handled by the orchestrator via statePublisher.
+                for await text in previewStream {
+                    await MainActor.run {
+                        context.currentPreviewText = text
+                    }
                 }
             }
 
-            // 4. Publish amplitude updates and watch for cancellation
+            // 4. Consume amplitude stream and update amplitude in real time
             AppLogger.log("[RecordingStage#\(sessionID)] Recording in progress")
-            for await _ in output.amplitude {
+            for await amp in output.amplitude {
                 try checkCancellation()
-                // Publish amplitude update via statePublisher on MainActor
-                // We use .recording(elapsedSeconds: 0) as a heartbeat; actual elapsed
-                // time is tracked by the orchestrator's timer.
                 await MainActor.run {
-                    context.statePublisher.send(.recording(elapsedSeconds: 0))
+                    context.currentAmplitude = amp
                 }
             }
             AppLogger.log("[RecordingStage#\(sessionID)] Audio amplitude stream ended")

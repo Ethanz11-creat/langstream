@@ -341,6 +341,16 @@ final class SessionController: ObservableObject {
                 self.elapsedSeconds += 1
                 self.sessionState = .recording(elapsedSeconds: self.elapsedSeconds)
 
+                // Update amplitude and preview text from RecordingStage
+                if let ctx = self.currentContext {
+                    if abs(self.amplitude - ctx.currentAmplitude) > 0.005 {
+                        self.amplitude = ctx.currentAmplitude
+                    }
+                    if ctx.currentPreviewText != self.previewText {
+                        self.previewText = ctx.currentPreviewText
+                    }
+                }
+
                 // Auto-stop at max duration
                 if self.elapsedSeconds >= maxDuration {
                     AppLogger.log("[SessionController] Recording reached max duration (\(maxDuration)s), auto-stopping")

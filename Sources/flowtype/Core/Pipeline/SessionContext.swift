@@ -52,6 +52,14 @@ final class SessionContext {
     /// The target application that was frontmost when recording started.
     var targetApp: NSRunningApplication?
 
+    // MARK: - Real-time Recording State
+
+    /// Current audio amplitude (updated by RecordingStage during recording).
+    var currentAmplitude: Float = 0.0
+
+    /// Current AppleSpeech preview text (updated by RecordingStage during recording).
+    var currentPreviewText: String = ""
+
     // MARK: - Initialization
 
     init(sessionID: UInt64, statePublisher: PassthroughSubject<SessionState, Never>) {
