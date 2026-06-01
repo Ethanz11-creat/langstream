@@ -8,6 +8,17 @@ Flowtype is a macOS voice input app built for AI coding workflows.
 
 It helps developers turn spoken, messy, and highly verbal thoughts into clearer prompts for coding agents like Codex, Claude Code, and similar tools.
 
+## About this branch (`flowtype-local`)
+
+This branch contains the **Qwen3-ASR + Modular Pipeline** architecture. Key differences from `main`:
+
+- **ASR Engine**: Uses [`speech-swift`](https://github.com/soniqo/speech-swift) (Qwen3-ASR via MLX, ~300MB 4-bit) directly in Swift — no Python server
+- **Pipeline Architecture**: Modular stage-based pipeline (Recording → ASR → PostProcess → Polish → Injection) with `SessionContext` state propagation
+- **No Python dependency**: No `uv`, no Whisper Python server, no `setup_whisper.sh`
+- **macOS 15+ required** (Swift 6.2)
+
+> **What's missing from GitHub**: `mlx.metallib` (119MB Metal shader library) exceeds GitHub's file size limit. See [Continuing development on another machine](#continuing-development-on-another-machine) below.
+
 ## Why Flowtype
 
 - **Voice is faster than typing** — describe ideas at natural speaking speed
@@ -34,7 +45,7 @@ It helps developers turn spoken, messy, and highly verbal thoughts into clearer 
 
 1. **Record** — Double press `Command` to start voice capture (a capsule window appears at the bottom)
 2. **Preview** — Apple on-device speech recognition shows real-time transcription as you speak
-3. **Transcribe** — When recording stops, audio is sent to the local MLX Whisper server for high-quality transcription; if the server is unavailable, it falls back to AppleSpeech
+3. **Transcribe** — When recording stops, audio is sent to the local Qwen3-ASR model for high-quality transcription; if the model is unavailable, it falls back to AppleSpeech
 4. **Refine** — LLM cleans up filler words, fixes recognition errors, and structures the prompt (double-press end only)
 5. **Inject** — Result is typed directly into your active text field
 
@@ -46,103 +57,127 @@ Sources/flowtype/
 │   ├── FlowTypeApp.swift              # Entry point, accessory-only app
 │   └── StatusBarController.swift      # Status bar icon & menu
 ├── Core/
-│   ├── AppState.swift                 # Global state management
 │   ├── Configuration.swift            # Configuration model
 │   ├── ConfigurationStore.swift       # UserDefaults persistence with debounce
-│   ├── EnvMigration.swift             # One-time .env → GUI migration
-│   ├── PipelineOrchestrator.swift     # End-to-end audio → text pipeline
-│   └── AsyncRefiner.swift             # ASR + LLM refinement
+│   ├── PipelineOrchestrator.swift     # SessionController + SessionState state machine
+│   ├── Pipeline/                      # Modular pipeline stage architecture
+│   │   ├── SessionContext.swift       # Immutable context passed through stages
+│   │   ├── PipelineStage.swift        # Stage protocol
+│   │   ├── PipelineRegistry.swift     # Stage registration
+│   │   ├── Observers/                 # Real-time state observation
+│   │   └── Stages/                    # Individual pipeline stages
+│   │       ├── RecordingStage.swift   # Audio capture
+│   │       ├── ASRStage.swift         # Qwen3-ASR / AppleSpeech transcription
+│   │       ├── PostProcessStage.swift # Filler stripping, term correction
+│   │       ├── PolishStage.swift      # LLM refinement
+│   │       └── InjectionStage.swift   # Keyboard text injection
+│   ├── DailyStats.swift               # Usage statistics aggregation
+│   ├── DictationHistory.swift         # History persistence
+│   └── Dictionary.swift               # User vocabulary & auto-detected corrections
 ├── Services/
-│   ├── AudioRecorder.swift            # macOS audio capture (segmented)
-│   ├── KeyboardInjector.swift         # Text insertion via clipboard / HID
-│   ├── LLMService.swift               # SiliconFlow SSE streaming client
-│   ├── WhisperServerManager.swift     # Python server lifecycle (launch / port / health)
-│   ├── WhisperSetupChecker.swift      # Environment readiness checker
+│   ├── AudioRecorder.swift            # macOS audio capture (16kHz mono Float32)
+│   ├── AudioDevice.swift              # Input device enumeration & selection
+│   ├── KeyboardInjector.swift         # Text insertion via clipboard / CGEvent keystrokes
+│   ├── LLMService.swift               # OpenAI-compatible SSE streaming client
+│   ├── WindowManager.swift            # CGEventTap hotkey setup
 │   └── Speech/
-│       ├── SpeechRouter.swift         # Provider routing (MLXWhisper → AppleSpeech fallback)
+│       ├── SpeechRouter.swift         # Provider routing (QwenASR → AppleSpeech fallback)
 │       ├── SpeechProvider.swift       # Protocol
-│       ├── ASRPostProcessor.swift     # Filler stripping, term correction
-│       ├── ASRResultScorer.swift      # 7-dimension quality scoring
+│       ├── QwenASRProvider.swift      # Local Qwen3-ASR MLX model (~300MB 4-bit)
+│       ├── QwenModelState.swift       # Model load state management
 │       ├── AppleSpeechProvider.swift  # On-device speech recognition (preview + fallback)
-│       └── MLXWhisperProvider.swift   # Local MLX Whisper HTTP client
+│       └── ASRPostProcessor.swift     # Filler stripping, repetition detection, term correction
 ├── Settings/
 │   ├── SettingsView.swift             # SwiftUI settings panel
-│   └── SettingsWindowController.swift # Settings window host
+│   ├── SettingsWindowController.swift # Settings window host
+│   ├── MainWindowView.swift           # Settings tab container
+│   ├── OverviewPage.swift             # Daily stats dashboard
+│   ├── HistoryPage.swift              # Dictation history with export
+│   ├── VocabPage.swift                # Personal dictionary management
+│   └── StylePage.swift                # UI style customization
+├── Features/
+│   └── Onboarding/
+│       └── OnboardingPipeline.swift   # First-launch guide
 ├── UI/
+│   ├── CapsuleView.swift              # Recording capsule window
+│   ├── FloatingPanel.swift            # Panel window host
 │   └── AudioVisualizer.swift          # Recording visual feedback
 ├── Utilities/
-│   ├── AudioFormatConverter.swift     # PCM → WAV, normalization, silence trim
-│   ├── SegmentMerger.swift            # Deduplicated segment merging
-│   ├── DotEnv.swift                   # .env file parser (legacy)
-│   └── PermissionHelper.swift         # Accessibility permission check & guide
-├── Resources/
-│   ├── tech_terms.json                # Tech term corrections
-│   └── filler_words.json              # Filler word dictionary
+│   ├── AppLogger.swift                # File-based diagnostic logging
+│   ├── AudioFormatConverter.swift     # PCM format conversion
+│   ├── KeychainHelper.swift           # Secure API key storage
+│   ├── PermissionHelper.swift         # Accessibility permission check & guide
+│   ├── SoundFeedback.swift            # Audio feedback for recording events
+│   └── UnsafeCell.swift               # Thread-safe value wrapper
+└── Resources/
+    ├── tech_terms.json                # Tech term corrections
+    ├── filler_words.json              # Filler word dictionary
+    ├── AppIcon.icns                   # App icon
+    └── status_bar_icon*.png           # Status bar icons
 ```
 
 ## Model Choice
 
-Flowtype uses [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), a port of OpenAI's Whisper optimized for Apple Silicon via the [MLX framework](https://ml-explore.github.io/mlx/).
+Flowtype uses [Qwen3-ASR](https://huggingface.co/aufklarer/Qwen3-ASR-0.6B-MLX-4bit) via the [`speech-swift`](https://github.com/soniqo/speech-swift) package — a Qwen3-based ASR model optimized for Apple Silicon via MLX.
+
+### Why Qwen3-ASR
+
+- **Small footprint** — ~300MB 4-bit quantized model, much lighter than Whisper Large v3 (~1.6GB)
+- **Fast loading** — loads directly in Swift via MLX, no Python server overhead
+- **Native MLX** — runs on Apple Silicon GPU/Neural Engine through Metal
+- **Quality** — strong performance on Chinese-English code-switching and technical vocabulary
 
 ### Why MLX
 
-[MLX](https://github.com/ml-explore/mlx) is Apple's machine learning framework built specifically for Apple Silicon. Key advantages for a macOS voice app:
+[MLX](https://github.com/ml-explore/mlx) is Apple's machine learning framework built specifically for Apple Silicon:
 
 - **Unified memory** — model weights live in system RAM, no VRAM copying overhead
 - **Native Metal backend** — compute shaders run directly on the GPU / Neural Engine
 - **Low latency** — no network round-trip; transcription happens on-device
 - **Privacy** — audio never leaves your machine
 
-### Why `whisper-large-v3-turbo`
-
-The default model is [`mlx-community/whisper-large-v3-turbo`](https://huggingface.co/mlx-community/whisper-large-v3-turbo), a distilled variant of Whisper Large v3 optimized for MLX:
-
-| Model | Size | Speed | Quality | Best For |
-|-------|------|-------|---------|----------|
-| `whisper-large-v3-turbo` | ~1.6 GB | Fast | Excellent | Default — balanced speed & accuracy |
-
-- **Distilled** — trained from Large v3 with fewer decoder layers, achieving near-Large quality at ~2× the speed
-- **MLX-optimized** — weights are pre-converted to MLX format (`.safetensors`), loading and running natively on Apple Silicon
-- **Multilingual** — supports automatic language detection (中文 / English / others) via a single model
-- **Local-only** — runs entirely offline after the one-time download
-
-> **Coming soon**: support for lighter variants such as `whisper-tiny` for users who prefer minimal memory footprint over absolute accuracy.
-
 ## Requirements
 
-- macOS 14+
+- macOS 15+
 - Swift 6.2+
-- Apple Silicon (M1 or later) — for local MLX Whisper inference
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) — Python package manager
+- Apple Silicon (M1 or later) — for local MLX inference
 - [SiliconFlow API key](https://cloud.siliconflow.cn/account/ak) — for LLM text refinement only (ASR is fully local)
 
 ## Setup
 
-### 1. Install uv (Python manager)
+### 1. Build
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 2. Install local ASR environment
-
-```bash
-./scripts/setup_whisper.sh
-```
-
-This creates a Python virtual environment, installs dependencies, and downloads the Whisper model (~1.6 GB). The model is cached globally at `~/.cache/huggingface/hub/`.
-
-### 3. Build & run
-
-```bash
-# Build
 swift build
+```
 
-# Run
+### 2. Provide `mlx.metallib` (required for Qwen3-ASR GPU inference)
+
+SPM cannot compile Metal shaders. The `mlx.metallib` file must be copied next to the binary from a Python `mlx` installation:
+
+```bash
+# Install Python mlx (if not already installed)
+pip install mlx
+
+# Find and copy the metallib
+python3 -c "import mlx, pathlib; print(pathlib.Path(mlx.__file__).parent / 'lib' / 'mlx.metallib')"
+# Then copy the printed path to:
+cp <path-to-mlx.metallib> .build/debug/
+```
+
+Common locations:
+- `~/.cache/uv/archive-v0/*/mlx/lib/mlx.metallib` (if using `uv`)
+- `~/.cache/pip/*/mlx/lib/mlx.metallib` (if using `pip`)
+
+> ⚠️ **Without `mlx.metallib`, Qwen3-ASR will crash at runtime.** This file is intentionally excluded from Git (119MB > GitHub's 100MB limit).
+
+### 3. Run
+
+```bash
 swift run FlowType
 ```
 
-Or build the `.app` bundle:
+Or build the `.app` bundle (which automatically copies `mlx.metallib` if found):
 
 ```bash
 ./scripts/build-app.sh
@@ -155,9 +190,11 @@ All settings are managed through the **Settings GUI** (click the status bar icon
 
 | Section | Settings |
 |----------|---------|
-| **Local ASR** | Model status, one-click install, language (Auto / 中文 / English) |
+| **Local ASR** | Model load status, language (Auto / 中文 / English) |
 | **LLM** | Provider, Base URL, API Key, Model ID |
 | **Trigger Key** | Fn / Control / Option / Command |
+| **History** | Dictation history with JSON/CSV export |
+| **Dictionary** | Personal vocabulary & auto-detected corrections |
 
 Settings are persisted to `UserDefaults` automatically. An existing `.env` file will be **migrated once** on first launch, after which the GUI settings take precedence.
 
@@ -165,21 +202,38 @@ Settings are persisted to `UserDefaults` automatically. An existing `.env` file 
 
 | Scenario | Behavior |
 |----------|----------|
-| Local model ready | MLX Whisper serves final transcription |
-| Local model not installed / loading / crashed | AppleSpeech provides final transcription |
+| Qwen3-ASR model loaded | Qwen3-ASR serves final transcription |
+| Qwen3-ASR not loaded / crashed | AppleSpeech provides final transcription |
 | Real-time preview | AppleSpeech streams live transcription during recording |
 
-## ASR Evaluation
+## Continuing development on another machine
 
-The `tools/` directory includes an evaluation framework for benchmarking ASR providers:
+When cloning this repo on a new Mac, here's what's **not included** and what you need to do:
 
-```bash
-cd tools
-cp .env ../.env  # ensure API key is available
-python evaluate_asr.py --output-dir eval_output/
-```
+1. **Clone & build**
+   ```bash
+   git clone -b flowtype-local https://github.com/Ethanz11-creat/Flowtype.git
+   cd Flowtype
+   swift build
+   ```
 
-See [`tools/eval_data/README.md`](tools/eval_data/README.md) for dataset details.
+2. **Install Python `mlx`** to get `mlx.metallib`:
+   ```bash
+   pip install mlx
+   ```
+
+3. **Copy `mlx.metallib`** next to the debug binary:
+   ```bash
+   python3 -c "import mlx, pathlib; print(pathlib.Path(mlx.__file__).parent / 'lib' / 'mlx.metallib')"
+   cp <path-from-above> .build/debug/
+   ```
+
+4. **Run**
+   ```bash
+   swift run FlowType
+   ```
+
+The `.gitignore` excludes: `build/`, `FlowType.app/`, `FlowType` binary, `*.dmg`, and `.build/` (SPM build directory). Only source code and resources are tracked in git.
 
 ## License
 
