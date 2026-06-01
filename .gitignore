@@ -8,3 +8,9 @@ DerivedData/
 .netrc
 .env
 .worktrees/
+
+# Build outputs
+/build
+/FlowType.app
+/FlowType
+*.dmg
